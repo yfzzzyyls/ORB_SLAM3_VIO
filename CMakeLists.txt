@@ -238,6 +238,10 @@ add_executable(stereo_inertial_euroc
         Examples/Stereo-Inertial/stereo_inertial_euroc.cc)
 target_link_libraries(stereo_inertial_euroc ${PROJECT_NAME})
 
+add_executable(stereo_inertial_aria
+        Examples/Stereo-Inertial/stereo_inertial_aria.cc)
+target_link_libraries(stereo_inertial_aria ${PROJECT_NAME})
+
 add_executable(stereo_inertial_tum_vi
         Examples/Stereo-Inertial/stereo_inertial_tum_vi.cc)
 target_link_libraries(stereo_inertial_tum_vi ${PROJECT_NAME})
