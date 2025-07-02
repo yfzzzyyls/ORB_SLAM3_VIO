@@ -7,7 +7,7 @@ This guide explains how to process and run Aria Everyday Activities (AEA) datase
 ### Key Achievements
 1. **Data Conversion**: Successfully converts Aria VRS to TUM-VI format
    - 480×640 images with 90° rotation applied
-   - IMU at 100Hz (downsampled from 1000Hz with interpolation)
+   - IMU at 1000Hz (native rate, no downsampling)
    - Proper nanosecond timestamps
 
 2. **Headless Execution**: Created `mono_inertial_tum_vi_noviewer`
@@ -70,10 +70,10 @@ VRS_FILE="/mnt/ssd_ext/incSeg-data/aria_everyday/loc2_script4_seq3_rec1/AriaEver
 #### Step 4: Convert VRS to TUM-VI Format
 ```bash
 # Quick test with 30 seconds of data
-python aria_to_tumvi.py "$VRS_FILE" aria_tumvi_test --duration 30 --imu-freq 100
+python aria_to_tumvi.py "$VRS_FILE" aria_tumvi_test --duration 30
 
 # Or convert full sequence (may take several minutes)
-python aria_to_tumvi.py "$VRS_FILE" aria_tumvi_full --imu-freq 100
+python aria_to_tumvi.py "$VRS_FILE" aria_tumvi_full
 ```
 
 #### Step 5: Run ORB-SLAM3
@@ -132,7 +132,7 @@ echo "Keyframes: $(wc -l < results/kf_test_run.txt)"
 ## Overview
 
 - **Camera**: SLAM left camera (640×480 @ 10Hz, 150° FOV, global shutter)
-- **IMU**: Right IMU (1000Hz native, downsampled to 100Hz)
+- **IMU**: Right IMU (1000Hz native rate)
 - **Processing**: 90° clockwise rotation applied to all images
 - **Mode**: Monocular-Inertial (most reliable for Aria)
 
@@ -160,13 +160,13 @@ Converts Aria VRS files to TUM-VI format that ORB-SLAM3 understands:
 python aria_to_tumvi.py /path/to/recording.vrs output_dir
 
 # Test with 30 seconds
-python aria_to_tumvi.py /path/to/recording.vrs output_dir --duration 30 --imu-freq 100
+python aria_to_tumvi.py /path/to/recording.vrs output_dir --duration 30
 ```
 
 Features:
 - Extracts SLAM left camera (1201-1) at 10Hz
 - Applies 90° clockwise rotation automatically
-- Downsamples IMU from 1000Hz to 100Hz with interpolation
+- Extracts IMU at native 1000Hz rate (no downsampling)
 - Creates IMU measurements between camera frames (critical for preintegration)
 - Saves nanosecond timestamps (ORB-SLAM3 requirement)
 
@@ -191,7 +191,7 @@ The `mono_inertial_tum_vi_noviewer` executable runs without display:
 - **Camera Model**: KannalaBrandt8 (fisheye)
 - **Resolution**: 480×640 (after rotation)
 - **Features**: 2000 ORB features
-- **IMU Frequency**: 1000Hz in config (data is 100Hz)
+- **IMU Frequency**: 1000Hz (native rate)
 
 ### Output Files
 - `f_<name>.txt`: Full frame trajectory (TUM format)
@@ -231,7 +231,7 @@ This is **NOT an error** - it's ORB-SLAM3's recovery mechanism:
 
 ## Key Files Created
 
-- `aria_to_tumvi.py` - VRS to TUM-VI converter with IMU interpolation
+- `aria_to_tumvi.py` - VRS to TUM-VI converter (1kHz IMU)
 - `mono_inertial_tum_vi_noviewer.cc` - Headless ORB-SLAM3 executable
 - `Examples/Monocular-Inertial/Aria2TUM-VI.yaml` - Aria camera/IMU configuration
 - `run_orbslam3_aria_tumvi_headless.sh` - Convenience execution script
@@ -242,7 +242,7 @@ This is **NOT an error** - it's ORB-SLAM3's recovery mechanism:
 
 - The 90° rotation is critical - Aria cameras are mounted sideways
 - Monocular-Inertial mode works more reliably than Stereo-Inertial
-- IMU downsampling to 100Hz is essential for performance
+- IMU data is extracted at native 1000Hz rate for maximum accuracy
 - Vocabulary loading takes ~30 seconds (139MB file)
 - The 150° FOV provides excellent tracking robustness
 - IMU helps during fast motions and low-texture areas

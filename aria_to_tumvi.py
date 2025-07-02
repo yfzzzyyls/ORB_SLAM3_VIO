@@ -24,25 +24,7 @@ except ImportError:
     sys.exit(1)
 
 
-def interpolate_timestamps(timestamps, factor=10):
-    """
-    Interpolate timestamps to create more frequent samples.
-    Used for IMU data to ensure measurements between camera frames.
-    """
-    interpolated = []
-    for i in range(len(timestamps) - 1):
-        start = timestamps[i]
-        end = timestamps[i + 1]
-        # Generate 'factor' points between start and end
-        for j in range(factor):
-            t = start + (end - start) * j / factor
-            interpolated.append(int(t))
-    # Add the last original timestamp
-    interpolated.append(timestamps[-1])
-    return interpolated
-
-
-def convert_aria_to_tumvi(vrs_path, output_dir, start_time=0, duration=None, imu_freq=100):
+def convert_aria_to_tumvi(vrs_path, output_dir, start_time=0, duration=None):
     """
     Convert Aria VRS file to TUM-VI format
     
@@ -51,12 +33,11 @@ def convert_aria_to_tumvi(vrs_path, output_dir, start_time=0, duration=None, imu
         output_dir: Output directory for TUM-VI format data
         start_time: Start time in seconds (optional)
         duration: Duration in seconds (optional)
-        imu_freq: Target IMU frequency (default 100Hz, downsampled from 1000Hz)
     """
     print(f"Converting Aria VRS to TUM-VI format...")
     print(f"Input: {vrs_path}")
     print(f"Output: {output_dir}")
-    print(f"IMU frequency: {imu_freq} Hz")
+    print(f"IMU frequency: 1000 Hz (native)")
     
     # Create output directories
     output_path = Path(output_dir)
@@ -166,15 +147,11 @@ def convert_aria_to_tumvi(vrs_path, output_dir, start_time=0, duration=None, imu
     
     print(f"\nCreated timestamps.txt with {len(left_img_timestamps)} entries")
     
-    # Extract IMU data with interpolation
-    print(f"\nExtracting IMU data at {imu_freq} Hz...")
+    # Extract IMU data at native rate
+    print(f"\nExtracting IMU data at native 1000Hz...")
     
-    # Calculate IMU interpolation factor (camera is 10Hz)
-    camera_freq = 10  # Aria SLAM cameras run at 10Hz
-    imu_interpolation_factor = imu_freq // camera_freq
-    
-    # Create interpolated IMU timestamps
-    imu_timestamps = interpolate_timestamps(left_img_timestamps, factor=imu_interpolation_factor)
+    # For 1kHz IMU, we need to extract all IMU samples between the first and last camera timestamps
+    # This ensures ORB-SLAM3 has IMU data available between consecutive camera frames
     
     # Write IMU data
     imu_data_path = mav0_path / "imu0" / "data.csv"
@@ -183,23 +160,28 @@ def convert_aria_to_tumvi(vrs_path, output_dir, start_time=0, duration=None, imu
     with open(imu_data_path, 'w') as f:
         f.write("#timestamp [ns],w_x [rad/s],w_y [rad/s],w_z [rad/s],a_x [m/s^2],a_y [m/s^2],a_z [m/s^2]\n")
         
-        for imu_timestamp_ns in imu_timestamps:
-            # Get closest IMU measurement
-            imu_data = provider.get_imu_data_by_time_ns(
-                imu_id, imu_timestamp_ns, TimeDomain.DEVICE_TIME, TimeQueryOptions.CLOSEST
-            )
+        # Get all IMU samples in the time range
+        for idx in range(provider.get_num_data(imu_id)):
+            imu_data = provider.get_imu_data_by_index(imu_id, idx)
+            timestamp_ns = imu_data.capture_timestamp_ns
+            
+            # Skip samples outside our time range
+            if timestamp_ns < t_start_ns:
+                continue
+            if timestamp_ns > t_end_ns:
+                break
             
             # Extract gyro and accel data
             gx, gy, gz = imu_data.gyro_radsec
             ax, ay, az = imu_data.accel_msec2
             
-            f.write(f"{imu_timestamp_ns},{gx},{gy},{gz},{ax},{ay},{az}\n")
+            f.write(f"{timestamp_ns},{gx},{gy},{gz},{ax},{ay},{az}\n")
             imu_count += 1
             
-            if imu_count % 1000 == 0:
+            if imu_count % 10000 == 0:
                 print(f"  Processed {imu_count} IMU samples...")
     
-    print(f"  Extracted {imu_count} IMU samples at {imu_freq}Hz")
+    print(f"  Extracted {imu_count} IMU samples at 1000Hz")
     
     # Calculate and save IMU-Camera transformation
     print("\nCalculating IMU-Camera transformation...")
@@ -270,8 +252,6 @@ def main():
                         help='Start time in seconds (optional)')
     parser.add_argument('--duration', type=float, default=None,
                         help='Duration in seconds (optional)')
-    parser.add_argument('--imu-freq', type=int, default=100,
-                        help='IMU output frequency in Hz (default: 100)')
     
     args = parser.parse_args()
     
@@ -285,8 +265,7 @@ def main():
         args.vrs_file,
         args.output_dir,
         args.start_time,
-        args.duration,
-        args.imu_freq
+        args.duration
     )
     
     sys.exit(0 if success else 1)

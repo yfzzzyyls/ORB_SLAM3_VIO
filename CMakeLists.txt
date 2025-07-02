@@ -242,9 +242,7 @@ add_executable(stereo_inertial_euroc
         Examples/Stereo-Inertial/stereo_inertial_euroc.cc)
 target_link_libraries(stereo_inertial_euroc ${PROJECT_NAME})
 
-add_executable(stereo_inertial_aria
-        Examples/Stereo-Inertial/stereo_inertial_aria.cc)
-target_link_libraries(stereo_inertial_aria ${PROJECT_NAME})
+# Removed stereo_inertial_aria as we're using monocular-inertial mode
 
 add_executable(stereo_inertial_tum_vi
         Examples/Stereo-Inertial/stereo_inertial_tum_vi.cc)
