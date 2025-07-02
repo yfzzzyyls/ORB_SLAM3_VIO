@@ -58,7 +58,7 @@ VRS_FILE=$(find /mnt/ssd_ext/incSeg-data/aria_everyday -name "*main_recording.vr
 echo "Found: $VRS_FILE"
 
 # Option 3: Use a specific known path
-VRS_FILE="/mnt/ssd_ext/incSeg-data/aria_everyday/loc1_script1_seq1_rec1/AriaEverydayActivities_1.0.0_loc1_script1_seq1_rec1_main_recording.vrs"
+VRS_FILE="/mnt/ssd_ext/incSeg-data/aria_everyday/loc3_script4_seq3_rec1/AriaEverydayActivities_1.0.0_loc3_script4_seq3_rec1_main_recording.vrs"
 
 # Option 4: Interactive selection
 echo "Available sequences:"
@@ -113,7 +113,7 @@ head -5 results/f_my_trajectory.txt
 #### Step 7: Evaluate SLAM Performance
 ```bash
 # Run complete evaluation with metrics and visualization plots
-./evaluate_slam_clean.sh
+./evaluate_slam_clean.sh aria_tumvi_test my_trajectory
 
 # View results
 cd evaluation && ls -la

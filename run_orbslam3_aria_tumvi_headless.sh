@@ -1,6 +1,7 @@
 #!/bin/bash
 
 # Run ORB-SLAM3 on Aria data using TUM-VI format (headless version)
+# Now supports automatic detection of converted data directory
 
 echo "ORB-SLAM3 Aria TUM-VI Runner (Headless)"
 echo "========================================"
@@ -9,6 +10,8 @@ echo "========================================"
 if [ $# -lt 1 ]; then
     echo "Usage: $0 <data_directory> [output_name]"
     echo "Example: $0 aria_tumvi_test test_trajectory"
+    echo ""
+    echo "The data_directory should contain the mav0 folder from aria_to_tumvi.py conversion"
     exit 1
 fi
 
@@ -21,6 +24,7 @@ source /home/external/ORB_SLAM3_AEA/setup_env.sh
 # Check if data exists
 if [ ! -d "$DATA_DIR/mav0" ]; then
     echo "Error: Data directory not found: $DATA_DIR/mav0"
+    echo "Make sure you've run aria_to_tumvi.py first!"
     exit 1
 fi
 
@@ -47,6 +51,12 @@ echo "Data summary:"
 echo "  Images: $NUM_IMAGES"
 echo "  Timestamps: $NUM_TIMESTAMPS"
 echo "  IMU samples: $NUM_IMU"
+
+# Extract sequence info from dataset.yaml if available
+if [ -f "$DATA_DIR/dataset.yaml" ]; then
+    SEQUENCE_NAME=$(grep "sequence_name:" "$DATA_DIR/dataset.yaml" | cut -d':' -f2 | xargs)
+    echo "  Sequence: $SEQUENCE_NAME"
+fi
 echo ""
 
 # Create results directory
@@ -93,3 +103,11 @@ if [ -f "kf_${OUTPUT_NAME}.txt" ]; then
     echo "Keyframe trajectory saved to: results/kf_${OUTPUT_NAME}.txt"
     echo "Number of keyframes: $(wc -l < kf_${OUTPUT_NAME}.txt)"
 fi
+
+# Save info about which data was processed
+echo "$DATA_DIR" > last_processed_data_dir.txt
+echo "$OUTPUT_NAME" > last_trajectory_name.txt
+
+echo ""
+echo "To evaluate this trajectory, run:"
+echo "./evaluate_slam_clean.sh $DATA_DIR $OUTPUT_NAME"

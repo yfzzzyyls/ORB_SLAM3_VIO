@@ -235,6 +235,27 @@ def convert_aria_to_tumvi(vrs_path, output_dir, start_time=0, duration=None, rec
     print(f"  {mav0_path}/imu0/data.csv \\")
     print(f"  output_trajectory")
     
+    # Create dataset.yaml with sequence information
+    dataset_yaml = output_path / "dataset.yaml"
+    # Extract sequence name from VRS path
+    vrs_path_parts = Path(vrs_path).parts
+    sequence_name = None
+    for part in vrs_path_parts:
+        if part.startswith("loc") and "_script" in part:
+            sequence_name = part
+            break
+    
+    with open(dataset_yaml, 'w') as f:
+        f.write("%YAML:1.0\n")
+        f.write(f"dataset_name: Aria Everyday Activities\n")
+        if sequence_name:
+            f.write(f"sequence_name: {sequence_name}\n")
+        f.write(f"vrs_file: {vrs_path}\n")
+        f.write(f"camera_rate: 10.0\n")
+        f.write(f"imu_rate: 1000.0\n")
+        f.write(f"duration: {(t_end_ns - t_start_ns) / 1e9:.1f}\n")
+        f.write(f"num_images: {len(left_img_timestamps)}\n")
+    
     return True
 
 
