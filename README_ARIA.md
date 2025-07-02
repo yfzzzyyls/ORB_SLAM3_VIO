@@ -111,6 +111,18 @@ head -5 results/f_my_trajectory.txt
 - Output format: TUM trajectory (timestamp + 7-DOF pose)
 
 #### Step 7: Evaluate SLAM Performance
+
+**Important**: First extract MPS ground truth data if not already done:
+```bash
+# Option 1: Use the helper script (recommended)
+./extract_mps_for_sequence.sh loc3_script4_seq3_rec1  # Replace with your sequence name
+
+# Option 2: Manual extraction
+unzip -o /mnt/ssd_ext/incSeg-data/aria_everyday/loc3_script4_seq3_rec1/*mps*.zip \
+     -d /mnt/ssd_ext/incSeg-data/aria_everyday/loc3_script4_seq3_rec1/
+```
+
+Then run the evaluation:
 ```bash
 # Run complete evaluation with metrics and visualization plots
 ./evaluate_slam_clean.sh aria_tumvi_test my_trajectory

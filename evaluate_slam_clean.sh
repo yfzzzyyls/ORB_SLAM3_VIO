@@ -71,13 +71,30 @@ else
     exit 1
 fi
 
-# Get VRS start time from ORB-SLAM3 output
-VRS_START_TIME_NS=$(head -1 "$TRAJECTORY_FILE" | awk '{print $1}' | cut -d'.' -f1)
-echo "VRS start time: $VRS_START_TIME_NS ns"
+# Get actual VRS start time from the VRS file using the dataset.yaml
+echo "Getting VRS device timestamp..."
+VRS_FILE=$(grep "vrs_file:" "$DATA_DIR/dataset.yaml" | cut -d':' -f2- | xargs)
+if [ -f "$VRS_FILE" ]; then
+    VRS_START_TIME_NS=$(source ~/venv/py39/bin/activate && python -c "
+from projectaria_tools.core import data_provider
+provider = data_provider.create_vrs_data_provider('$VRS_FILE')
+slam_left = provider.get_stream_id_from_label('camera-slam-left')
+img_data = provider.get_image_data_by_index(slam_left, 0)
+print(img_data[1].capture_timestamp_ns)
+" 2>/dev/null)
+    echo "VRS device start time: $VRS_START_TIME_NS ns"
+else
+    echo "Warning: Could not find VRS file, using relative timestamps"
+    VRS_START_TIME_NS=""
+fi
 
-# Extract MPS ground truth with timestamp alignment
+# Extract MPS ground truth
 echo "Extracting MPS closed-loop ground truth from: $SEQUENCE_DIR"
-python extract_mps_ground_truth.py "$SEQUENCE_DIR" --output-dir ground_truth_data --vrs-start-time-ns $VRS_START_TIME_NS
+if [ -n "$VRS_START_TIME_NS" ]; then
+    python extract_mps_ground_truth.py "$SEQUENCE_DIR" --output-dir ground_truth_data --vrs-start-time-ns $VRS_START_TIME_NS
+else
+    python extract_mps_ground_truth.py "$SEQUENCE_DIR" --output-dir ground_truth_data
+fi
 
 # Check if ground truth was extracted
 GROUND_TRUTH_FILE="ground_truth_data/mps_closed_loop_tum.txt"
@@ -87,16 +104,28 @@ if [ ! -f "$GROUND_TRUTH_FILE" ]; then
     exit 1
 fi
 
+# Align SLAM trajectory timestamps with MPS timestamps
+echo -e "\n=== Aligning trajectories ==="
+python align_trajectories.py "$TRAJECTORY_FILE" "$GROUND_TRUTH_FILE"
+ALIGNED_TRAJECTORY="${TRAJECTORY_FILE%.txt}_aligned.txt"
+
+if [ ! -f "$ALIGNED_TRAJECTORY" ]; then
+    echo "Error: Trajectory alignment failed!"
+    exit 1
+fi
+
+echo "Using aligned trajectory: $ALIGNED_TRAJECTORY"
+
 # 1. Compute ATE (Absolute Trajectory Error)
 echo -e "\n=== Computing ATE ==="
-evo_ape tum "$GROUND_TRUTH_FILE" "$TRAJECTORY_FILE" \
+evo_ape tum "$GROUND_TRUTH_FILE" "$ALIGNED_TRAJECTORY" \
     --plot --plot_mode xy --save_plot evaluation/ate_plot.pdf \
     --save_results evaluation/ate_results.zip \
     --align --correct_scale
 
 # 2. Compute RPE at 1 second (10 frames at 10Hz)
 echo -e "\n=== Computing RPE at 1 second (10 frames) ==="
-evo_rpe tum "$GROUND_TRUTH_FILE" "$TRAJECTORY_FILE" \
+evo_rpe tum "$GROUND_TRUTH_FILE" "$ALIGNED_TRAJECTORY" \
     --plot --plot_mode xy --save_plot evaluation/rpe_1s_plot.pdf \
     --save_results evaluation/rpe_1s_results.zip \
     --align --correct_scale \
@@ -104,7 +133,7 @@ evo_rpe tum "$GROUND_TRUTH_FILE" "$TRAJECTORY_FILE" \
 
 # 3. Compute RPE at 5 seconds (50 frames at 10Hz)
 echo -e "\n=== Computing RPE at 5 seconds (50 frames) ==="
-evo_rpe tum "$GROUND_TRUTH_FILE" "$TRAJECTORY_FILE" \
+evo_rpe tum "$GROUND_TRUTH_FILE" "$ALIGNED_TRAJECTORY" \
     --plot --plot_mode xy --save_plot evaluation/rpe_5s_plot.pdf \
     --save_results evaluation/rpe_5s_results.zip \
     --align --correct_scale \
@@ -112,10 +141,10 @@ evo_rpe tum "$GROUND_TRUTH_FILE" "$TRAJECTORY_FILE" \
 
 # 4. Create trajectory comparison plots
 echo -e "\n=== Plotting Trajectory Comparison ==="
-evo_traj tum "$GROUND_TRUTH_FILE" --ref "$TRAJECTORY_FILE" \
+evo_traj tum "$GROUND_TRUTH_FILE" --ref "$ALIGNED_TRAJECTORY" \
     --plot --plot_mode xyz --save_plot evaluation/trajectory_comparison_3d.pdf 2>/dev/null || true
 
-evo_traj tum "$GROUND_TRUTH_FILE" --ref "$TRAJECTORY_FILE" \
+evo_traj tum "$GROUND_TRUTH_FILE" --ref "$ALIGNED_TRAJECTORY" \
     --plot --plot_mode xy --save_plot evaluation/trajectory_comparison_top.pdf 2>/dev/null || true
 
 # Extract and display metrics
