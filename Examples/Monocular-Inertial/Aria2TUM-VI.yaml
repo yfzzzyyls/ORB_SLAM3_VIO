@@ -44,11 +44,11 @@ IMU.T_b_c1: !!opencv-matrix
           0.0, 0.0, 0.0, 1.0]
 
 # IMU noise parameters for Aria IMU (1202-1)
-IMU.NoiseGyro: 1.7453e-4      # rad/s/√Hz (gyroscope noise density)
-IMU.NoiseAcc: 7.8480e-4       # m/s²/√Hz (accelerometer noise density)
-IMU.GyroWalk: 2.2689e-5       # rad/s²/√Hz (gyroscope random walk)
-IMU.AccWalk: 3.4335e-4        # m/s³/√Hz (accelerometer random walk)
-IMU.Frequency: 1000.0         # Hz (native IMU frequency)
+IMU.NoiseGyro: 1.6968e-4      # rad/s/√Hz (TUM-VI gyroscope noise density)
+IMU.NoiseAcc: 2.8000e-3       # m/s²/√Hz (TUM-VI accelerometer noise density)
+IMU.GyroWalk: 1.9393e-5       # rad/s²/√Hz (TUM-VI gyroscope random walk)
+IMU.AccWalk: 8.6000e-4        # m/s³/√Hz (TUM-VI accelerometer random walk)
+IMU.Frequency: 200.0          # Hz (downsampled for ORB-SLAM3)
 
 #--------------------------------------------------------------------------------------------
 # ORB Parameters

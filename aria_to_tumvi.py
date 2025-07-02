@@ -24,7 +24,7 @@ except ImportError:
     sys.exit(1)
 
 
-def convert_aria_to_tumvi(vrs_path, output_dir, start_time=0, duration=None):
+def convert_aria_to_tumvi(vrs_path, output_dir, start_time=0, duration=None, rectify=False):
     """
     Convert Aria VRS file to TUM-VI format
     
@@ -33,6 +33,7 @@ def convert_aria_to_tumvi(vrs_path, output_dir, start_time=0, duration=None):
         output_dir: Output directory for TUM-VI format data
         start_time: Start time in seconds (optional)
         duration: Duration in seconds (optional)
+        rectify: If True, rectify fisheye images to pinhole projection (default: False)
     """
     print(f"Converting Aria VRS to TUM-VI format...")
     print(f"Input: {vrs_path}")
@@ -68,6 +69,22 @@ def convert_aria_to_tumvi(vrs_path, output_dir, start_time=0, duration=None):
     camera_left_calib = provider.get_device_calibration().get_camera_calib(camera_left_label)
     camera_right_calib = provider.get_device_calibration().get_camera_calib(camera_right_label)
     
+    # Create pinhole calibrations if rectifying
+    pinhole_left = None
+    pinhole_right = None
+    if rectify:
+        print("Using pinhole rectification (512x512, fx=fy=150)...")
+        pinhole_left = calibration.get_linear_camera_calibration(
+            512, 512, 150.0,
+            camera_left_label,
+            camera_left_calib.get_transform_device_camera()
+        )
+        pinhole_right = calibration.get_linear_camera_calibration(
+            512, 512, 150.0,
+            camera_right_label,
+            camera_right_calib.get_transform_device_camera()
+        )
+    
     # Get time range
     t_start_ns = provider.get_first_time_ns(camera_left_id, TimeDomain.DEVICE_TIME)
     t_end_ns = provider.get_last_time_ns(camera_left_id, TimeDomain.DEVICE_TIME)
@@ -100,9 +117,17 @@ def convert_aria_to_tumvi(vrs_path, output_dir, start_time=0, duration=None):
             
             left_img_timestamps.append(timestamp_ns)
             
-            # Save image with 90° clockwise rotation
+            # Get image array
             image_array = img_data.to_numpy_array()
-            rotated_image = np.rot90(image_array, k=3)  # 90° clockwise
+            
+            # Rectify if requested
+            if rectify:
+                image_array = calibration.distort_by_calibration(
+                    image_array, pinhole_left, camera_left_calib
+                )
+            
+            # Rotate 90° clockwise
+            rotated_image = np.rot90(image_array, k=3)
             
             filename = f"{timestamp_ns}.png"
             filepath = mav0_path / "cam0" / "data" / filename
@@ -125,9 +150,17 @@ def convert_aria_to_tumvi(vrs_path, output_dir, start_time=0, duration=None):
                 camera_right_id, timestamp_ns, TimeDomain.DEVICE_TIME, TimeQueryOptions.CLOSEST
             )
             
-            # Save with same timestamp as left for synchronization
+            # Get image array
             image_array = img_data.to_numpy_array()
-            rotated_image = np.rot90(image_array, k=3)  # 90° clockwise
+            
+            # Rectify if requested
+            if rectify:
+                image_array = calibration.distort_by_calibration(
+                    image_array, pinhole_right, camera_right_calib
+                )
+            
+            # Rotate 90° clockwise
+            rotated_image = np.rot90(image_array, k=3)
             
             filename = f"{timestamp_ns}.png"
             filepath = mav0_path / "cam1" / "data" / filename
@@ -185,13 +218,18 @@ def convert_aria_to_tumvi(vrs_path, output_dir, start_time=0, duration=None):
     
     # Calculate and save IMU-Camera transformation
     print("\nCalculating IMU-Camera transformation...")
-    save_transforms(provider, mav0_path)
+    save_transforms(provider, mav0_path, rectify)
     
     print("\nConversion complete!")
     print(f"\nTo run ORB-SLAM3:")
     print(f"./Examples/Monocular-Inertial/mono_inertial_tum_vi \\")
     print(f"  Vocabulary/ORBvoc.txt \\")
-    print(f"  Examples/Monocular-Inertial/Aria2TUM-VI.yaml \\")
+    
+    if rectify:
+        print(f"  Examples/Monocular-Inertial/Aria2TUM-VI_Pinhole.yaml \\")
+    else:
+        print(f"  Examples/Monocular-Inertial/Aria2TUM-VI.yaml \\")
+    
     print(f"  {mav0_path}/cam0/data \\")
     print(f"  {mav0_path}/timestamps.txt \\")
     print(f"  {mav0_path}/imu0/data.csv \\")
@@ -200,7 +238,7 @@ def convert_aria_to_tumvi(vrs_path, output_dir, start_time=0, duration=None):
     return True
 
 
-def save_transforms(provider, save_path):
+def save_transforms(provider, save_path, rectify=False):
     """Calculate and save IMU-Camera transformation matrices"""
     camera_left_label = "camera-slam-left"
     camera_right_label = "camera-slam-right"
@@ -209,9 +247,26 @@ def save_transforms(provider, save_path):
     camera_left_calib = provider.get_device_calibration().get_camera_calib(camera_left_label)
     camera_right_calib = provider.get_device_calibration().get_camera_calib(camera_right_label)
     
-    # Rotate calibrations by 90° clockwise
-    left_cw90 = calibration.rotate_camera_calib_cw90deg(camera_left_calib)
-    right_cw90 = calibration.rotate_camera_calib_cw90deg(camera_right_calib)
+    # Handle calibrations based on rectification mode
+    if rectify:
+        # For rectified images, use pinhole calibrations
+        left_cw90 = calibration.get_linear_camera_calibration(
+            512, 512, 150.0,
+            camera_left_label,
+            camera_left_calib.get_transform_device_camera()
+        )
+        right_cw90 = calibration.get_linear_camera_calibration(
+            512, 512, 150.0,
+            camera_right_label,
+            camera_right_calib.get_transform_device_camera()
+        )
+        # Rotate the pinhole calibrations
+        left_cw90 = calibration.rotate_camera_calib_cw90deg(left_cw90)
+        right_cw90 = calibration.rotate_camera_calib_cw90deg(right_cw90)
+    else:
+        # For raw images, just rotate the fisheye calibrations
+        left_cw90 = calibration.rotate_camera_calib_cw90deg(camera_left_calib)
+        right_cw90 = calibration.rotate_camera_calib_cw90deg(camera_right_calib)
     
     imu_calib = provider.get_device_calibration().get_imu_calib("imu-right")
     
@@ -252,6 +307,8 @@ def main():
                         help='Start time in seconds (optional)')
     parser.add_argument('--duration', type=float, default=None,
                         help='Duration in seconds (optional)')
+    parser.add_argument('--rectify', action='store_true',
+                        help='Rectify fisheye images to pinhole projection (512x512)')
     
     args = parser.parse_args()
     
@@ -265,7 +322,8 @@ def main():
         args.vrs_file,
         args.output_dir,
         args.start_time,
-        args.duration
+        args.duration,
+        args.rectify
     )
     
     sys.exit(0 if success else 1)

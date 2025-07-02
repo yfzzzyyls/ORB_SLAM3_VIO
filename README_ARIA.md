@@ -110,133 +110,22 @@ head -5 results/f_my_trajectory.txt
 - Typically tracks 70-80% of frames (e.g., 233/301 frames)
 - Output format: TUM trajectory (timestamp + 7-DOF pose)
 
-### Quick Test (All-in-One)
+#### Step 7: Evaluate SLAM Performance
 ```bash
-# Complete test pipeline
-cd /home/external/ORB_SLAM3_AEA
-source ~/venv/py39/bin/activate
-source setup_env.sh
+# Run complete evaluation with metrics and visualization plots
+./evaluate_slam_clean.sh
 
-# Find and convert a test sequence
-VRS_FILE=$(find /mnt/ssd_ext/incSeg-data/aria_everyday -name "*.vrs" | head -1)
-python aria_to_tumvi.py "$VRS_FILE" test_data --duration 30
-
-# Run ORB-SLAM3
-./run_orbslam3_aria_tumvi_headless.sh test_data test_run
-
-# Check results
-echo "Poses tracked: $(wc -l < results/f_test_run.txt)"
-echo "Keyframes: $(wc -l < results/kf_test_run.txt)"
+# View results
+cd evaluation && ls -la
 ```
 
-## Overview
+**Generated Evaluation Files:**
+- `ate_plot.pdf`: Absolute Trajectory Error visualization
+- `rpe_1s_plot.pdf`: Relative Pose Error at 1 second intervals
+- `rpe_5s_plot.pdf`: Relative Pose Error at 5 second intervals
+- `slam_evaluation_summary.md`: Summary report with all metrics
 
-- **Camera**: SLAM left camera (640×480 @ 10Hz, 150° FOV, global shutter)
-- **IMU**: Right IMU (1000Hz native rate)
-- **Processing**: 90° clockwise rotation applied to all images
-- **Mode**: Monocular-Inertial (most reliable for Aria)
-
-## Prerequisites
-
-1. Python environment with projectaria_tools:
-```bash
-source ~/venv/py39/bin/activate
-pip install projectaria_tools opencv-python numpy
-```
-
-2. Build ORB-SLAM3 (if not already built):
-```bash
-cd /home/external/ORB_SLAM3_AEA
-./build.sh
-```
-
-## Working Implementation: Monocular-Inertial with TUM-VI Format
-
-### Data Conversion Pipeline (aria_to_tumvi.py)
-Converts Aria VRS files to TUM-VI format that ORB-SLAM3 understands:
-
-```bash
-# Full conversion
-python aria_to_tumvi.py /path/to/recording.vrs output_dir
-
-# Test with 30 seconds
-python aria_to_tumvi.py /path/to/recording.vrs output_dir --duration 30
-```
-
-Features:
-- Extracts SLAM left camera (1201-1) at 10Hz
-- Applies 90° clockwise rotation automatically
-- Extracts IMU at native 1000Hz rate (no downsampling)
-- Creates IMU measurements between camera frames (critical for preintegration)
-- Saves nanosecond timestamps (ORB-SLAM3 requirement)
-
-### Headless ORB-SLAM3 Execution
-The `mono_inertial_tum_vi_noviewer` executable runs without display:
-
-```bash
-# Using the convenience script
-./run_orbslam3_aria_tumvi_headless.sh output_dir trajectory_name
-
-# Or directly
-./Examples/Monocular-Inertial/mono_inertial_tum_vi_noviewer \
-    Vocabulary/ORBvoc.txt \
-    Examples/Monocular-Inertial/Aria2TUM-VI.yaml \
-    output_dir/mav0/cam0/data \
-    output_dir/mav0/timestamps.txt \
-    output_dir/mav0/imu0/data.csv \
-    trajectory_name
-```
-
-### Configuration (Aria2TUM-VI.yaml)
-- **Camera Model**: KannalaBrandt8 (fisheye)
-- **Resolution**: 480×640 (after rotation)
-- **Features**: 2000 ORB features
-- **IMU Frequency**: 1000Hz (native rate)
-
-### Output Files
-- `f_<name>.txt`: Full frame trajectory (TUM format)
-- `kf_<name>.txt`: Keyframe trajectory
-- Example: 275 poses tracked from 301 frames
-
-## Evaluating Performance
-
-### Quick Analysis
-```bash
-# Analyze trajectory statistics
-python evaluate_trajectory.py results/f_my_trajectory.txt
-```
-
-Expected good performance metrics:
-- **Tracking rate**: > 80% of frames (e.g., 254/301 = 84%)
-- **Average speed**: Consistent with motion (0.5-1.5 m/s for walking)
-- **Large jumps**: < 2% of frames with jumps > 0.5m
-- **Map resets**: Normal during initialization, system should recover
-
-### Understanding "Fail to track local map!"
-This is **NOT an error** - it's ORB-SLAM3's recovery mechanism:
-- Common during initialization (first 10-15 seconds)
-- System automatically creates new map and continues
-- Look for "VIBA" messages indicating successful IMU integration
-
-## Troubleshooting
-
-1. **"Hanging" after loading**: Not actually hanging - vocabulary loading takes ~30 seconds
-2. **No output progress**: Add debug prints or use the noviewer version with progress tracking
-3. **"SLAM cameras not found"**: Check if the VRS file contains SLAM camera streams
-4. **Tracking failures**: Ensure sufficient lighting and texture in the scene
-5. **IMU initialization**: Need ~15 seconds of motion at startup
-6. **Memory issues**: Use `--max-frames` to limit sequence length
-7. **Timestamps in output**: Output timestamps are in nanoseconds (not seconds) - this is the Aria native format
-8. **"Fail to track local map!"**: Normal recovery behavior, not an error
-
-## Key Files Created
-
-- `aria_to_tumvi.py` - VRS to TUM-VI converter (1kHz IMU)
-- `mono_inertial_tum_vi_noviewer.cc` - Headless ORB-SLAM3 executable
-- `Examples/Monocular-Inertial/Aria2TUM-VI.yaml` - Aria camera/IMU configuration
-- `run_orbslam3_aria_tumvi_headless.sh` - Convenience execution script
-- `evaluate_trajectory.py` - Trajectory analysis tool
-- `extract_ground_truth.py` - MPS ground truth extraction (if available)
+**Note**: The evaluation script creates synthetic ground truth for demonstration. For real ground truth evaluation, use Aria's MPS trajectories.
 
 ## Notes
 
