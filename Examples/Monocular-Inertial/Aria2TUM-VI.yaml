@@ -1,0 +1,84 @@
+%YAML:1.0
+
+#--------------------------------------------------------------------------------------------
+# Camera Parameters for Aria SLAM cameras (after 90° clockwise rotation)
+#--------------------------------------------------------------------------------------------
+File.version: "1.0"
+
+# Camera model - KannalaBrandt8 for fisheye/wide-angle cameras
+Camera.type: "KannalaBrandt8"
+
+# Camera intrinsics after 90° clockwise rotation
+# Original: 640x480 -> Rotated: 480x640
+Camera1.fx: 242.704
+Camera1.fy: 242.704
+Camera1.cx: 235.65
+Camera1.cy: 318.078
+
+# Kannala-Brandt distortion parameters
+# Mapped from Aria's projection parameters
+Camera1.k1: -0.0256882    # Aria k2
+Camera1.k2: 0.102607      # Aria k3
+Camera1.k3: -0.0737081    # Aria k4
+Camera1.k4: 0.0133687     # Aria k5
+
+# Camera resolution (after rotation)
+Camera.width: 480
+Camera.height: 640
+
+# Camera frame rate
+Camera.fps: 10
+
+# Color order (0: BGR, 1: RGB. Ignored for grayscale)
+Camera.RGB: 1
+
+# Transformation from IMU (body frame) to left camera
+# This matrix is calculated from Aria calibration data
+IMU.T_b_c1: !!opencv-matrix
+   rows: 4
+   cols: 4
+   dt: f
+   data: [-0.202544303602, 0.978379674653, 0.041821254208, 0.019051545640,
+          0.226582830936, 0.088369194992, -0.969974796632, -0.111436829102,
+          -0.952699336519, -0.186986891523, -0.239582713472, 0.079492102063,
+          0.0, 0.0, 0.0, 1.0]
+
+# IMU noise parameters for Aria IMU (1202-1)
+IMU.NoiseGyro: 1.7453e-4      # rad/s/√Hz (gyroscope noise density)
+IMU.NoiseAcc: 7.8480e-4       # m/s²/√Hz (accelerometer noise density)
+IMU.GyroWalk: 2.2689e-5       # rad/s²/√Hz (gyroscope random walk)
+IMU.AccWalk: 3.4335e-4        # m/s³/√Hz (accelerometer random walk)
+IMU.Frequency: 1000.0         # Hz (native IMU frequency)
+
+#--------------------------------------------------------------------------------------------
+# ORB Parameters
+#--------------------------------------------------------------------------------------------
+
+# ORB Extractor: Number of features per image
+ORBextractor.nFeatures: 2000
+
+# ORB Extractor: Scale factor between levels in the scale pyramid
+ORBextractor.scaleFactor: 1.2
+
+# ORB Extractor: Number of levels in the scale pyramid
+ORBextractor.nLevels: 8
+
+# ORB Extractor: Fast threshold
+# Image is divided in a grid. At each cell FAST are extracted imposing a minimum response.
+# Firstly we impose iniThFAST. If no corners are detected we impose a lower value minThFAST
+ORBextractor.iniThFAST: 20
+ORBextractor.minThFAST: 7
+
+#--------------------------------------------------------------------------------------------
+# Viewer Parameters
+#--------------------------------------------------------------------------------------------
+Viewer.KeyFrameSize: 0.05
+Viewer.KeyFrameLineWidth: 1.0
+Viewer.GraphLineWidth: 0.9
+Viewer.PointSize: 2.0
+Viewer.CameraSize: 0.08
+Viewer.CameraLineWidth: 3.0
+Viewer.ViewpointX: 0.0
+Viewer.ViewpointY: -0.7
+Viewer.ViewpointZ: -3.5
+Viewer.ViewpointF: 500.0
