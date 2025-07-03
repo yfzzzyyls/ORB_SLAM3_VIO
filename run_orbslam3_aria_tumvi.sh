@@ -1,10 +1,10 @@
 #!/bin/bash
 
-# Run ORB-SLAM3 on Aria data using TUM-VI format (headless version)
+# Run ORB-SLAM3 on Aria data using TUM-VI format with Pangolin viewer
 # Now supports automatic detection of converted data directory
 
-echo "ORB-SLAM3 Aria TUM-VI Runner (Headless)"
-echo "========================================"
+echo "ORB-SLAM3 Aria TUM-VI Runner (with Viewer)"
+echo "==========================================="
 
 # Check arguments
 if [ $# -lt 1 ]; then
@@ -19,7 +19,17 @@ DATA_DIR=$1
 OUTPUT_NAME=${2:-"aria_trajectory"}
 
 # Setup environment
-source /home/external/ORB_SLAM3_AEA/setup_env.sh
+# Assume user has already activated conda environment
+if [ "$CONDA_DEFAULT_ENV" != "orbslam" ]; then
+    echo "Warning: Not in orbslam conda environment!"
+    echo "Please run: conda activate orbslam"
+    echo "Continuing anyway..."
+fi
+
+# Set Pangolin paths
+export Pangolin_DIR=/home/external/Pangolin/build
+export CMAKE_PREFIX_PATH=/home/external/Pangolin/build:$CMAKE_PREFIX_PATH
+export LD_LIBRARY_PATH=/home/external/Pangolin/build:$LD_LIBRARY_PATH
 
 # Check if data exists
 if [ ! -d "$DATA_DIR/mav0" ]; then
@@ -70,12 +80,20 @@ ABS_IMU_FILE="$ABS_DATA_DIR/mav0/imu0/data.csv"
 
 cd results
 
-# Run ORB-SLAM3 without viewer
-echo "Starting ORB-SLAM3 (headless)..."
+# Run ORB-SLAM3 with Pangolin viewer
+echo "Starting ORB-SLAM3 (with viewer)..."
 echo "Output will be saved to: $OUTPUT_NAME"
 echo ""
+echo "Viewer controls:"
+echo "  - Left mouse: Rotate view"
+echo "  - Right mouse: Pan view" 
+echo "  - Scroll: Zoom in/out"
+echo "  - 's': Start/stop SLAM"
+echo "  - 'r': Reset system"
+echo "  - 'q': Quit"
+echo ""
 
-/home/external/ORB_SLAM3_AEA/Examples/Monocular-Inertial/mono_inertial_tum_vi_noviewer \
+/home/external/ORB_SLAM3_AEA/Examples/Monocular-Inertial/mono_inertial_tum_vi \
     /home/external/ORB_SLAM3_AEA/Vocabulary/ORBvoc.txt \
     /home/external/ORB_SLAM3_AEA/Examples/Monocular-Inertial/Aria2TUM-VI.yaml \
     "$ABS_IMAGES_DIR" \

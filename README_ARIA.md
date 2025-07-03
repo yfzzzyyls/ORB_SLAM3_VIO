@@ -28,8 +28,9 @@ This guide explains how to process and run Aria Everyday Activities (AEA) datase
 # Navigate to ORB-SLAM3 directory
 cd /home/external/ORB_SLAM3_AEA
 
-# Activate Python environment for Aria tools
-source ~/venv/py39/bin/activate
+# Activate conda environment for Aria tools and visualization
+source /home/external/miniconda/bin/activate
+conda activate orbslam
 
 # Setup ORB-SLAM3 environment
 source setup_env.sh
@@ -79,10 +80,10 @@ python aria_to_tumvi.py "$VRS_FILE" aria_tumvi_full
 #### Step 5: Run ORB-SLAM3
 ```bash
 # Using the convenience script (recommended)
-./run_orbslam3_aria_tumvi_headless.sh aria_tumvi_test my_trajectory
+./run_orbslam3_aria_tumvi.sh aria_tumvi_test my_trajectory
 
 # Or run directly
-./Examples/Monocular-Inertial/mono_inertial_tum_vi_noviewer \
+./Examples/Monocular-Inertial/mono_inertial_tum_vi \
     Vocabulary/ORBvoc.txt \
     Examples/Monocular-Inertial/Aria2TUM-VI.yaml \
     aria_tumvi_test/mav0/cam0/data \

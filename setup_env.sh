@@ -1,28 +1,22 @@
 #!/bin/bash
-# Setup environment for ORB-SLAM3 with local OpenCV and Pangolin
+# Setup environment for ORB-SLAM3 using conda environment
 
-# Activate Python virtual environment
-source ~/venv/py39/bin/activate
+# Only activate conda if not already in the orbslam environment
+if [ "$CONDA_DEFAULT_ENV" != "orbslam" ]; then
+    source /home/external/miniconda3/bin/activate
+    conda activate orbslam
+fi
 
-# Set OpenCV paths
-export OpenCV_DIR=/home/external/opencv_install/lib64/cmake/opencv4
-export PKG_CONFIG_PATH=/home/external/opencv_install/lib64/pkgconfig:$PKG_CONFIG_PATH
-export LD_LIBRARY_PATH=/home/external/opencv_install/lib64:$LD_LIBRARY_PATH
-
-# Set Pangolin paths
+# Note: Pangolin must be built separately as it's not in conda
+# Set Pangolin paths (needs to be rebuilt if deleted)
 export Pangolin_DIR=/home/external/Pangolin/build
 export CMAKE_PREFIX_PATH=/home/external/Pangolin/build:$CMAKE_PREFIX_PATH
 export LD_LIBRARY_PATH=/home/external/Pangolin/build:$LD_LIBRARY_PATH
 
-# Set GLEW paths
-export GLEW_ROOT=/home/external/glew_install/usr
-export CMAKE_PREFIX_PATH=/home/external/glew_install/usr:$CMAKE_PREFIX_PATH
-export PKG_CONFIG_PATH=/home/external/glew_install/usr/lib64/pkgconfig:$PKG_CONFIG_PATH
-
 echo "Environment configured:"
-echo "  Python venv: $VIRTUAL_ENV"
-echo "  OpenCV_DIR: $OpenCV_DIR"
-echo "  Pangolin_DIR: $Pangolin_DIR"
-echo "  GLEW_ROOT: $GLEW_ROOT"
+echo "  Conda env: $CONDA_DEFAULT_ENV (provides OpenCV, Python packages)"
+echo "  Pangolin_DIR: $Pangolin_DIR (must be built from source)"
 echo ""
-echo "You can now build ORB-SLAM3 with: ./build.sh"
+echo "You can now:"
+echo "  - Build ORB-SLAM3 with: ./build.sh"
+echo "  - Run test sequence with: ./test_new_sequence.sh"
