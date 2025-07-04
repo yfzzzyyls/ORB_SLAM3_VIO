@@ -70,25 +70,28 @@ VRS_FILE="/mnt/ssd_ext/incSeg-data/aria_everyday/loc2_script4_seq3_rec1/AriaEver
 
 #### Step 4: Convert VRS to TUM-VI Format
 ```bash
-# Quick test with 30 seconds of data
-python aria_to_tumvi.py "$VRS_FILE" aria_tumvi_test --duration 30
-
-# Or convert full sequence (may take several minutes)
+# Convert full sequence (recommended for complete evaluation)
 python aria_to_tumvi.py "$VRS_FILE" aria_tumvi_full
+
+# Or for quick testing with 30 seconds of data
+python aria_to_tumvi.py "$VRS_FILE" aria_tumvi_test --duration 30
 ```
 
 #### Step 5: Run ORB-SLAM3
 ```bash
-# Using the convenience script (recommended)
+# For full sequence (after converting with aria_tumvi_full)
+./run_orbslam3_aria_tumvi.sh aria_tumvi_full my_trajectory
+
+# For test sequence (if using aria_tumvi_test)
 ./run_orbslam3_aria_tumvi.sh aria_tumvi_test my_trajectory
 
 # Or run directly
 ./Examples/Monocular-Inertial/mono_inertial_tum_vi \
     Vocabulary/ORBvoc.txt \
     Examples/Monocular-Inertial/Aria2TUM-VI.yaml \
-    aria_tumvi_test/mav0/cam0/data \
-    aria_tumvi_test/mav0/timestamps.txt \
-    aria_tumvi_test/mav0/imu0/data.csv \
+    aria_tumvi_full/mav0/cam0/data \
+    aria_tumvi_full/mav0/timestamps.txt \
+    aria_tumvi_full/mav0/imu0/data.csv \
     my_trajectory
 ```
 
@@ -126,6 +129,10 @@ unzip -o /mnt/ssd_ext/incSeg-data/aria_everyday/loc3_script4_seq3_rec1/*mps*.zip
 Then run the evaluation:
 ```bash
 # Run complete evaluation with metrics and visualization plots
+# For full sequence
+./evaluate_slam_clean.sh aria_tumvi_full my_trajectory
+
+# For test sequence (30 seconds)
 ./evaluate_slam_clean.sh aria_tumvi_test my_trajectory
 
 # View results

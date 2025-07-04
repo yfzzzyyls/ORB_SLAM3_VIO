@@ -75,7 +75,7 @@ fi
 echo "Getting VRS device timestamp..."
 VRS_FILE=$(grep "vrs_file:" "$DATA_DIR/dataset.yaml" | cut -d':' -f2- | xargs)
 if [ -f "$VRS_FILE" ]; then
-    VRS_START_TIME_NS=$(source /home/external/miniconda/bin/activate && conda activate orbslam && python -c "
+    VRS_START_TIME_NS=$(source /home/external/miniconda3/bin/activate && conda activate orbslam && python -c "
 from projectaria_tools.core import data_provider
 provider = data_provider.create_vrs_data_provider('$VRS_FILE')
 slam_left = provider.get_stream_id_from_label('camera-slam-left')
