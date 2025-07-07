@@ -24,8 +24,6 @@
 #include <pangolin/pangolin.h>
 #include <iomanip>
 #include <openssl/md5.h>
-#include <sys/stat.h>
-#include <sstream>
 #include <boost/serialization/base_object.hpp>
 #include <boost/serialization/string.hpp>
 #include <boost/archive/text_iarchive.hpp>
@@ -43,8 +41,7 @@ Verbose::eLevel Verbose::th = Verbose::VERBOSITY_NORMAL;
 System::System(const string &strVocFile, const string &strSettingsFile, const eSensor sensor,
                const bool bUseViewer, const int initFr, const string &strSequence):
     mSensor(sensor), mpViewer(static_cast<Viewer*>(NULL)), mbReset(false), mbResetActiveMap(false),
-    mbActivateLocalizationMode(false), mbDeactivateLocalizationMode(false), mbShutDown(false),
-    mbSaveTrackingData(false)
+    mbActivateLocalizationMode(false), mbDeactivateLocalizationMode(false), mbShutDown(false)
 {
     // Output welcome message
     cout << endl <<
@@ -472,12 +469,6 @@ Sophus::SE3f System::TrackMonocular(const cv::Mat &im, const double &timestamp, 
     mTrackingState = mpTracker->mState;
     mTrackedMapPoints = mpTracker->mCurrentFrame.mvpMapPoints;
     mTrackedKeyPointsUn = mpTracker->mCurrentFrame.mvKeysUn;
-    
-    // Save tracking data if enabled
-    if(mbSaveTrackingData && mpTracker->mState == Tracking::OK)
-    {
-        SaveFrameTrackingData();
-    }
 
     return Tcw;
 }
@@ -1552,72 +1543,6 @@ string System::CalculateCheckSum(string filename, int type)
     }
 
     return checksum;
-}
-
-void System::EnableTrackingDataSave(const string& strPath)
-{
-    mbSaveTrackingData = true;
-    mStrTrackingDataPath = strPath;
-    cout << "Tracking data will be saved to: " << strPath << endl;
-}
-
-void System::SaveFrameTrackingData()
-{
-    // Get current frame data from tracker
-    Frame& currentFrame = mpTracker->mCurrentFrame;
-    
-    // Create filename
-    stringstream ss;
-    ss << mStrTrackingDataPath << "/frame_" << setfill('0') << setw(6) << currentFrame.mnId << ".txt";
-    
-    ofstream f;
-    f.open(ss.str());
-    f << fixed << setprecision(9);
-    
-    // Save frame info
-    f << "# Frame ID, timestamp" << endl;
-    f << currentFrame.mnId << " " << currentFrame.mTimeStamp << endl;
-    
-    // Save camera pose (4x4 matrix)
-    f << "# Camera pose (camera to world)" << endl;
-    Sophus::SE3f Twc = currentFrame.GetPose().inverse();
-    for(int i=0; i<4; i++) {
-        for(int j=0; j<4; j++) {
-            f << Twc.matrix()(i,j) << " ";
-        }
-        f << endl;
-    }
-    
-    // Save number of features
-    f << "# Number of tracked features" << endl;
-    f << currentFrame.N << endl;
-    
-    // Save features with depth
-    f << "# For each feature: u v depth point3D_id confidence" << endl;
-    for(int i=0; i<currentFrame.N; i++)
-    {
-        MapPoint* pMP = currentFrame.mvpMapPoints[i];
-        cv::KeyPoint kpUn = currentFrame.mvKeysUn[i];
-        
-        f << kpUn.pt.x << " " << kpUn.pt.y << " ";
-        
-        if(pMP && !pMP->isBad())
-        {
-            // Get depth
-            Eigen::Vector3f Pw = pMP->GetWorldPos();
-            Eigen::Vector3f Pc = currentFrame.GetPose() * Pw;
-            float depth = Pc(2);
-            
-            // Save depth, point ID, and observations count
-            f << depth << " " << pMP->mnId << " " << pMP->Observations() << endl;
-        }
-        else
-        {
-            f << "-1 -1 0" << endl;
-        }
-    }
-    
-    f.close();
 }
 
 } //namespace ORB_SLAM
