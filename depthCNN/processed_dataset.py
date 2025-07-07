@@ -67,7 +67,7 @@ class ProcessedADTDataset(Dataset):
                     'seq_dir': seq_dir,
                     'rgb_file': frame_info['rgb'],
                     'depth_file': frame_info['depth'],
-                    'timestamp_ns': frame_info['rgb_timestamp_ns'],
+                    'timestamp_ns': frame_info['timestamp_ns'],
                     'index': frame_info['index']
                 })
             

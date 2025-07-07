@@ -185,9 +185,6 @@ public:
     void ChangeDataset();
 
     float GetImageScale();
-    
-    // Enable saving tracking data for sparse depth extraction
-    void EnableTrackingDataSave(const string& strPath);
 
 #ifdef REGISTER_TIMES
     void InsertRectTime(double& time);
@@ -265,11 +262,6 @@ private:
     string mStrVocabularyFilePath;
 
     Settings* settings_;
-    
-    // Tracking data save
-    bool mbSaveTrackingData;
-    string mStrTrackingDataPath;
-    void SaveFrameTrackingData();
 };
 
 }// namespace ORB_SLAM
