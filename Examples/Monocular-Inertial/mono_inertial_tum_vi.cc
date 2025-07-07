@@ -27,6 +27,7 @@
 
 #include<System.h>
 #include "ImuTypes.h"
+#include <sys/stat.h>
 
 using namespace std;
 
@@ -56,6 +57,17 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    // Check if environment variable for tracking data save is set
+    bool bSaveTracking = false;
+    string strTrackingPath;
+    char* tracking_env = getenv("ORB_SLAM3_SAVE_TRACKING");
+    if(tracking_env != NULL)
+    {
+        bSaveTracking = true;
+        strTrackingPath = string(tracking_env);
+        cout << "Will save tracking data to: " << strTrackingPath << endl;
+        mkdir(strTrackingPath.c_str(), 0777);
+    }
 
     // Load all sequences:
     int seq;
@@ -117,6 +129,12 @@ int main(int argc, char **argv)
 
     // Create SLAM system. It initializes all system threads and gets ready to process frames.
     ORB_SLAM3::System SLAM(argv[1],argv[2],ORB_SLAM3::System::IMU_MONOCULAR, true, 0, file_name);
+    
+    // Enable tracking data save if environment variable is set
+    if(bSaveTracking)
+    {
+        SLAM.EnableTrackingDataSave(strTrackingPath);
+    }
     float imageScale = SLAM.GetImageScale();
 
     double t_resize = 0.f;
