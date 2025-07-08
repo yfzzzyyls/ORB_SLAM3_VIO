@@ -1,6 +1,6 @@
-# Aria Everyday Activities Dataset for ORB-SLAM3
+# Aria Digital Twin (ADT) Dataset for ORB-SLAM3
 
-This guide explains how to process and run Aria Everyday Activities (AEA) dataset with ORB-SLAM3.
+This guide explains how to process and run Aria Digital Twin (ADT) dataset with ORB-SLAM3.
 
 ## Successfully Running ORB-SLAM3 on Aria Data (2025-07-01)
 
@@ -9,11 +9,6 @@ This guide explains how to process and run Aria Everyday Activities (AEA) datase
    - 480×640 images with 90° rotation applied
    - IMU at 1000Hz (native rate, no downsampling)
    - Proper nanosecond timestamps
-
-2. **Headless Execution**: Created `mono_inertial_tum_vi_noviewer`
-   - Runs without display/viewer requirements
-   - Processes all 301 frames successfully
-   - Outputs trajectory files
 
 3. **Results**:
    - Map created with 313 points and 42 keyframes
@@ -26,10 +21,10 @@ This guide explains how to process and run Aria Everyday Activities (AEA) datase
 #### Step 1: Setup Environment
 ```bash
 # Navigate to ORB-SLAM3 directory
-cd /home/external/ORB_SLAM3_AEA
+cd /home/external/ORB_SLAM3_VIO
 
 # Activate conda environment for Aria tools and visualization
-source /home/external/miniconda/bin/activate
+source /home/external/miniconda3/bin/activate
 conda activate orbslam
 
 # Setup ORB-SLAM3 environment
@@ -49,23 +44,23 @@ make -j4
 cd ..
 ```
 
-#### Step 3: Find an Aria VRS File
+#### Step 3: Find an ADT VRS File
 ```bash
 # Option 1: List all available VRS files to choose from
-ls /mnt/ssd_ext/incSeg-data/aria_everyday/*/*main_recording.vrs
+ls /mnt/ssd_ext/incSeg-data/adt/*/*main_recording.vrs
 
-# Option 2: Find a specific sequence (e.g., location 1, recording 1)
-VRS_FILE=$(find /mnt/ssd_ext/incSeg-data/aria_everyday -name "*main_recording.vrs" | grep "loc1_script1_seq1_rec1" | head -1)
+# Option 2: Find a specific sequence (e.g., seq131)
+VRS_FILE=$(find /mnt/ssd_ext/incSeg-data/adt -name "*main_recording.vrs" | grep "seq131" | head -1)
 echo "Found: $VRS_FILE"
 
 # Option 3: Use a specific known path
-VRS_FILE="/mnt/ssd_ext/incSeg-data/aria_everyday/loc3_script4_seq3_rec1/AriaEverydayActivities_1.0.0_loc3_script4_seq3_rec1_main_recording.vrs"
+VRS_FILE="/mnt/ssd_ext/incSeg-data/adt/Apartment_release_clean_seq131_M1292/ADT_Apartment_release_clean_seq131_M1292_main_recording.vrs"
 
 # Option 4: Interactive selection
 echo "Available sequences:"
-ls /mnt/ssd_ext/incSeg-data/aria_everyday/
-# Then manually set the path (replace loc2_script4_seq3_rec1 with your chosen sequence)
-VRS_FILE="/mnt/ssd_ext/incSeg-data/aria_everyday/loc2_script4_seq3_rec1/AriaEverydayActivities_1.0.0_loc2_script4_seq3_rec1_main_recording.vrs"
+ls /mnt/ssd_ext/incSeg-data/adt/
+# Then manually set the path (replace Apartment_release_clean_seq131_M1292 with your chosen sequence)
+VRS_FILE="/mnt/ssd_ext/incSeg-data/adt/Apartment_release_clean_seq131_M1292/ADT_Apartment_release_clean_seq131_M1292_main_recording.vrs"
 ```
 
 #### Step 4: Convert VRS to TUM-VI Format
@@ -116,14 +111,14 @@ head -5 results/f_my_trajectory.txt
 
 #### Step 7: Evaluate SLAM Performance
 
-**Important**: First extract MPS ground truth data if not already done:
+**Important**: ADT dataset includes synthetic ground truth data (depth maps and trajectories):
 ```bash
-# Option 1: Use the helper script (recommended)
-./extract_mps_for_sequence.sh loc3_script4_seq3_rec1  # Replace with your sequence name
+# ADT sequences include ground truth in the same directory
+# Check for available ground truth data:
+ls /mnt/ssd_ext/incSeg-data/adt/Apartment_release_clean_seq131_M1292/
 
-# Option 2: Manual extraction
-unzip -o /mnt/ssd_ext/incSeg-data/aria_everyday/loc3_script4_seq3_rec1/*mps*.zip \
-     -d /mnt/ssd_ext/incSeg-data/aria_everyday/loc3_script4_seq3_rec1/
+# Note: ADT provides synthetic ground truth rather than MPS trajectories
+# The evaluation scripts may need modification for ADT's ground truth format
 ```
 
 Then run the evaluation:
@@ -145,7 +140,7 @@ cd evaluation && ls -la
 - `rpe_5s_plot.pdf`: Relative Pose Error at 5 second intervals
 - `slam_evaluation_summary.md`: Summary report with all metrics
 
-**Note**: The evaluation script creates synthetic ground truth for demonstration. For real ground truth evaluation, use Aria's MPS trajectories.
+**Note**: ADT provides synthetic ground truth data including depth maps and camera trajectories, which differs from the MPS trajectories in Aria Everyday Activities dataset.
 
 ## Notes
 

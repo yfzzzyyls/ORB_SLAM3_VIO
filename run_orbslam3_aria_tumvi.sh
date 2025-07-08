@@ -93,9 +93,9 @@ echo "  - 'r': Reset system"
 echo "  - 'q': Quit"
 echo ""
 
-/home/external/ORB_SLAM3_AEA/Examples/Monocular-Inertial/mono_inertial_tum_vi \
-    /home/external/ORB_SLAM3_AEA/Vocabulary/ORBvoc.txt \
-    /home/external/ORB_SLAM3_AEA/Examples/Monocular-Inertial/Aria2TUM-VI.yaml \
+../Examples/Monocular-Inertial/mono_inertial_tum_vi \
+    ../Vocabulary/ORBvoc.txt \
+    ../Examples/Monocular-Inertial/Aria2TUM-VI.yaml \
     "$ABS_IMAGES_DIR" \
     "$ABS_TIMESTAMPS_FILE" \
     "$ABS_IMU_FILE" \
