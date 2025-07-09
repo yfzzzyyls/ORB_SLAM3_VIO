@@ -17,24 +17,42 @@ class SLAMDepthDataset(Dataset):
     """Dataset for sparse-to-dense depth training from SLAM outputs"""
     
     def __init__(self, data_dir, split='train', transform=None, 
-                 load_poses=True, augment=True):
+                 load_poses=True, augment=True, target_size=None):
         """
         Args:
-            data_dir: Directory with processed SLAM data (from process_slam_to_sparse_depth.py)
+            data_dir: Directory with processed SLAM data (from process_slam_to_sparse_depth_adt.py)
             split: 'train' or 'val' 
             transform: Optional image transforms
             load_poses: Whether to load camera poses
             augment: Whether to apply data augmentation
+            target_size: (H, W) tuple for resizing, None to keep original
         """
         self.data_dir = Path(data_dir)
         self.split = split
         self.transform = transform
         self.load_poses = load_poses
         self.augment = augment
+        self.target_size = target_size
         
         # Load metadata
         with open(self.data_dir / 'metadata' / 'frames.json', 'r') as f:
             self.frames = json.load(f)
+        
+        # Load camera params if available (ADT specific)
+        camera_params_path = self.data_dir / 'metadata' / 'camera_params.json'
+        if camera_params_path.exists():
+            with open(camera_params_path, 'r') as f:
+                self.camera_params = json.load(f)
+        else:
+            # Default ADT SLAM camera params
+            self.camera_params = {
+                'width': 640,
+                'height': 480,
+                'fx': 242.7,
+                'fy': 242.7,
+                'cx': 318.08,
+                'cy': 235.65
+            }
         
         # Split data (80/20 train/val)
         n_frames = len(self.frames)
@@ -52,6 +70,7 @@ class SLAMDepthDataset(Dataset):
         self.K = np.load(self.data_dir / 'metadata' / 'intrinsics.npy')
         
         print(f"Loaded {len(self.indices)} frames for {split} split")
+        print(f"Camera resolution: {self.camera_params['height']}x{self.camera_params['width']}")
         
     def __len__(self):
         return len(self.indices)
@@ -68,7 +87,8 @@ class SLAMDepthDataset(Dataset):
             rgb = cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB)
         else:
             # Create blank image if RGB not available
-            h, w = 480, 640  # Default size
+            h = self.camera_params['height']
+            w = self.camera_params['width']
             rgb = np.zeros((h, w, 3), dtype=np.uint8)
         
         # Load sparse depth
@@ -84,6 +104,14 @@ class SLAMDepthDataset(Dataset):
         # Apply augmentation
         if self.augment and self.split == 'train':
             rgb, sparse_depth, confidence = self._augment(rgb, sparse_depth, confidence)
+        
+        # Resize if target size is specified
+        if self.target_size is not None and self.target_size != (rgb.shape[0], rgb.shape[1]):
+            rgb = cv2.resize(rgb, (self.target_size[1], self.target_size[0]))
+            sparse_depth = cv2.resize(sparse_depth, (self.target_size[1], self.target_size[0]), 
+                                    interpolation=cv2.INTER_NEAREST)
+            confidence = cv2.resize(confidence, (self.target_size[1], self.target_size[0]),
+                                  interpolation=cv2.INTER_LINEAR)
         
         # Convert to tensors
         rgb = torch.from_numpy(rgb.transpose(2, 0, 1)).float() / 255.0
@@ -103,7 +131,9 @@ class SLAMDepthDataset(Dataset):
             'pose': pose,
             'intrinsics': K,
             'frame_id': frame_id,
-            'timestamp': frame_info['timestamp']
+            'timestamp': frame_info['timestamp'],
+            'num_sparse_points': frame_info.get('num_features', -1),
+            'sparsity': frame_info.get('sparsity', 0.0)
         }
     
     def _augment(self, rgb, sparse_depth, confidence):
@@ -190,25 +220,36 @@ class SequentialSLAMDataset(Dataset):
 
 
 def create_dataloaders(data_dir, batch_size=8, num_workers=4, 
-                      sequential=False, sequence_length=3):
-    """Create train and validation dataloaders"""
+                      sequential=False, sequence_length=3, target_size=None):
+    """Create train and validation dataloaders
+    
+    Args:
+        data_dir: Directory with processed SLAM data
+        batch_size: Batch size for training
+        num_workers: Number of workers for data loading
+        sequential: Whether to use sequential dataset
+        sequence_length: Length of sequences if sequential
+        target_size: (H, W) tuple for resizing, None to keep original ADT size
+    """
     
     if sequential:
         train_dataset = SequentialSLAMDataset(
             data_dir, 
             split='train',
             sequence_length=sequence_length,
-            augment=True
+            augment=True,
+            target_size=target_size
         )
         val_dataset = SequentialSLAMDataset(
             data_dir,
             split='val', 
             sequence_length=sequence_length,
-            augment=False
+            augment=False,
+            target_size=target_size
         )
     else:
-        train_dataset = SLAMDepthDataset(data_dir, split='train', augment=True)
-        val_dataset = SLAMDepthDataset(data_dir, split='val', augment=False)
+        train_dataset = SLAMDepthDataset(data_dir, split='train', augment=True, target_size=target_size)
+        val_dataset = SLAMDepthDataset(data_dir, split='val', augment=False, target_size=target_size)
     
     train_loader = DataLoader(
         train_dataset,

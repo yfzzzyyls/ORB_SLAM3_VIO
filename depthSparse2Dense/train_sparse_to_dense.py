@@ -44,7 +44,8 @@ class DepthCompletionTrainer:
         self.train_loader, self.val_loader = create_dataloaders(
             config.data_dir,
             batch_size=config.batch_size,
-            num_workers=config.num_workers
+            num_workers=config.num_workers,
+            target_size=config.target_size if hasattr(config, 'target_size') else None
         )
         
         # Loss and optimizer
@@ -305,6 +306,10 @@ def main():
     # Other arguments
     parser.add_argument('--num_workers', type=int, default=4)
     parser.add_argument('--resume', action='store_true', help='Resume from checkpoint')
+    
+    # ADT specific arguments
+    parser.add_argument('--target_size', type=int, nargs=2, default=None,
+                       help='Target size (H W) for resizing. Default: None (keep original ADT size 480x640)')
     
     args = parser.parse_args()
     

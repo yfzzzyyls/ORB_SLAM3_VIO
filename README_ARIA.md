@@ -230,14 +230,28 @@ python aria_to_tumvi.py "$VRS_FILE" aria_tumvi_test --duration 60
 SAVE_TRACKING=1 ./run_orbslam3_aria_tumvi.sh aria_tumvi_test depth_training
 
 # 3. Post-process to sparse depth maps
-python depthSparse2Dense/process_slam_to_sparse_depth.py \
-    results/tracking_data_depth_training \
-    aria_tumvi_test/mav0/cam0/data \
-    processed_depth_data
+cd depthSparse2Dense
+python process_slam_to_sparse_depth_adt.py \
+    ../results/tracking_data_depth_training \
+    ../aria_tumvi_test \
+    processed_sparse_data \
+    --visualize
 
-# 4. Train UNet (TODO: test this)
-python depthSparse2Dense/train_sparse_to_dense.py \
-    --slam_dir processed_depth_data \
-    --rgb_dir processed_depth_data/rgb \
-    --epochs 100
+# 4. Train sparse-to-dense model
+python train_sparse_to_dense.py \
+    processed_sparse_data \
+    models \
+    --epochs 100 \
+    --batch_size 8 \
+    --model unet
+
+# Or use the complete pipeline script:
+./run_adt_pipeline.sh /path/to/vrs_file.vrs 30
 ```
+### Sparse-to-Dense Depth Prediction (Implemented)
+The `depthSparse2Dense/` directory contains the sparse-to-dense prediction pipeline:
+- Extracts sparse depth from ORB-SLAM3 map points during tracking
+- Trains U-Net to predict dense depth from RGB + sparse depth input
+- Optimized for ADT dataset (640×480 SLAM camera resolution)
+- Handles <1% pixel density typical of visual SLAM
+- See `depthSparse2Dense/README.md` for detailed documentation
