@@ -80,8 +80,8 @@ python process_slam_to_sparse_depth_adt.py \
 ### Step 5: Train Sparse-to-Dense Model
 ```bash
 python train_sparse_to_dense.py \
-    sparse_depth_output \
-    trained_models \
+    --data_dir sparse_depth_output \
+    --output_dir trained_models \
     --epochs 100 \
     --batch_size 8 \
     --learning_rate 1e-4 \

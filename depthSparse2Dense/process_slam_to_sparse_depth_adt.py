@@ -138,8 +138,12 @@ class SLAMDataProcessorADT:
             sparse_depth, confidence, num_valid = self.create_sparse_depth_map(data['features'])
             
             # Skip frames with too few points
-            if num_valid < 10:
+            if num_valid < 5:  # Lowered threshold
                 continue
+            
+            # Debug output
+            if data['frame_id'] % 100 == 0:
+                print(f"Frame {data['frame_id']}: {num_valid} valid depth points")
             
             # Find corresponding RGB image
             rgb_dir = self.tumvi_dir / 'mav0' / 'cam0' / 'data'
@@ -148,9 +152,17 @@ class SLAMDataProcessorADT:
             closest_ts = min(ts_mapping.keys(), key=lambda x: abs(x - data['timestamp']))
             frame_idx = ts_mapping[closest_ts]
             
-            # Load RGB image
+            # Load RGB image - try both naming conventions
+            # First try index-based naming
             rgb_filename = f"{frame_idx:010d}.png"
             rgb_path = rgb_dir / rgb_filename
+            
+            # If not found, try timestamp-based naming
+            if not rgb_path.exists():
+                # Convert timestamp to nanoseconds and format
+                timestamp_ns = int(data['timestamp'] * 1e9)
+                rgb_filename = f"{timestamp_ns}.png"
+                rgb_path = rgb_dir / rgb_filename
             
             if rgb_path.exists():
                 # Save sparse depth
@@ -171,7 +183,7 @@ class SLAMDataProcessorADT:
                     'timestamp': data['timestamp'],
                     'tumvi_frame': frame_idx,
                     'num_features': num_valid,
-                    'sparsity': num_valid / (height * width)
+                    'sparsity': num_valid / (self.camera_params['height'] * self.camera_params['width'])
                 })
                 
                 valid_frames += 1

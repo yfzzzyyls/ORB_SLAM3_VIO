@@ -85,6 +85,13 @@ class SLAMDepthDataset(Dataset):
         if rgb_path.exists():
             rgb = cv2.imread(str(rgb_path))
             rgb = cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB)
+            
+            # Apply 90-degree clockwise rotation for Aria cameras (sideways mounted)
+            # This makes the image natural human view
+            # Note: cv2.ROTATE_90_CLOCKWISE rotates and swaps dimensions
+            # Original: 640x480 -> After rotation: 480x640
+            if rgb.shape[0] > rgb.shape[1]:  # If height > width, it needs rotation
+                rgb = cv2.rotate(rgb, cv2.ROTATE_90_CLOCKWISE)
         else:
             # Create blank image if RGB not available
             h = self.camera_params['height']
@@ -94,6 +101,14 @@ class SLAMDepthDataset(Dataset):
         # Load sparse depth
         sparse_depth = np.load(self.data_dir / 'sparse_depth' / f'{frame_str}.npy')
         confidence = np.load(self.data_dir / 'sparse_depth' / f'{frame_str}_conf.npy')
+        
+        # Ensure consistent shapes
+        expected_h = self.camera_params['height']
+        expected_w = self.camera_params['width']
+        if sparse_depth.shape != (expected_h, expected_w):
+            print(f"Warning: Frame {frame_id} sparse depth has shape {sparse_depth.shape}, expected ({expected_h}, {expected_w})")
+        if confidence.shape != (expected_h, expected_w):
+            print(f"Warning: Frame {frame_id} confidence has shape {confidence.shape}, expected ({expected_h}, {expected_w})")
         
         # Load pose if requested
         if self.load_poses:
@@ -113,12 +128,12 @@ class SLAMDepthDataset(Dataset):
             confidence = cv2.resize(confidence, (self.target_size[1], self.target_size[0]),
                                   interpolation=cv2.INTER_LINEAR)
         
-        # Convert to tensors
-        rgb = torch.from_numpy(rgb.transpose(2, 0, 1)).float() / 255.0
-        sparse_depth = torch.from_numpy(sparse_depth).unsqueeze(0).float()
-        confidence = torch.from_numpy(confidence).unsqueeze(0).float()
-        pose = torch.from_numpy(pose).float()
-        K = torch.from_numpy(self.K).float()
+        # Convert to tensors (use .copy() to ensure contiguous memory)
+        rgb = torch.from_numpy(rgb.transpose(2, 0, 1).copy()).float() / 255.0
+        sparse_depth = torch.from_numpy(sparse_depth.copy()).unsqueeze(0).float()
+        confidence = torch.from_numpy(confidence.copy()).unsqueeze(0).float()
+        pose = torch.from_numpy(pose.copy()).float()
+        K = torch.from_numpy(self.K.copy()).float()
         
         # Apply additional transforms if provided
         if self.transform:
@@ -143,8 +158,8 @@ class SLAMDepthDataset(Dataset):
         # Random horizontal flip
         if random.random() > 0.5:
             rgb = cv2.flip(rgb, 1)
-            sparse_depth = np.fliplr(sparse_depth)
-            confidence = np.fliplr(confidence)
+            sparse_depth = np.fliplr(sparse_depth).copy()  # Make contiguous copy
+            confidence = np.fliplr(confidence).copy()  # Make contiguous copy
         
         # Random crop
         if random.random() > 0.5:
