@@ -159,6 +159,9 @@ class DepthCompletionTrainer:
             'a1': 0, 'a2': 0, 'a3': 0
         }
         
+        # Initialize latency measurement
+        inference_times = []
+        
         with torch.no_grad():
             for batch_idx, batch in enumerate(tqdm(self.val_loader, desc='Validation')):
                 # Move to device
@@ -169,8 +172,33 @@ class DepthCompletionTrainer:
                 # Prepare input
                 input_tensor = torch.cat([rgb, sparse_depth], dim=1)
                 
-                # Forward pass
+                # Forward pass for the batch
                 pred_depth = self.model(input_tensor)
+                
+                # Measure single-image inference latency (only on first batch)
+                if batch_idx == 0 and torch.cuda.is_available():
+                    # Extract single image
+                    single_input = input_tensor[:1]  # First image only
+                    
+                    # Warmup
+                    for _ in range(3):
+                        _ = self.model(single_input)
+                    
+                    # Time single image inference
+                    start_event = torch.cuda.Event(enable_timing=True)
+                    end_event = torch.cuda.Event(enable_timing=True)
+                    
+                    # Measure multiple runs for stability
+                    single_times = []
+                    for _ in range(10):
+                        torch.cuda.synchronize()
+                        start_event.record()
+                        _ = self.model(single_input)
+                        end_event.record()
+                        torch.cuda.synchronize()
+                        single_times.append(start_event.elapsed_time(end_event))
+                    
+                    inference_times.extend(single_times)
                 
                 # Compute loss
                 rgb_warped = rgb  # Placeholder
@@ -213,6 +241,13 @@ class DepthCompletionTrainer:
         
         # Combine losses and metrics for return
         val_losses.update(val_metrics)
+        
+        # Calculate latency statistics
+        if inference_times:
+            val_losses['latency_mean'] = np.mean(inference_times)
+            val_losses['latency_std'] = np.std(inference_times)
+            val_losses['latency_min'] = np.min(inference_times)
+            val_losses['latency_max'] = np.max(inference_times)
         
         return val_losses
     
@@ -318,6 +353,12 @@ class DepthCompletionTrainer:
             print(f"Epoch {epoch} - Val metrics: abs_rel={val_losses['abs_rel']:.4f}, "
                   f"rmse={val_losses['rmse']:.4f}m, "
                   f"δ₁={val_losses['a1']:.4f} ({val_losses['a1']*100:.1f}%)")
+            
+            # Print latency information
+            if 'latency_mean' in val_losses:
+                fps = 1000 / val_losses['latency_mean']
+                print(f"Epoch {epoch} - Inference latency: {val_losses['latency_mean']:.1f}±{val_losses['latency_std']:.1f} ms "
+                      f"(min: {val_losses['latency_min']:.1f}, max: {val_losses['latency_max']:.1f}) → {fps:.1f} FPS")
             
             # Update learning rate
             self.scheduler.step(val_losses['total'])
