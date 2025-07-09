@@ -181,7 +181,7 @@ class DepthCompletionTrainer:
                     single_input = input_tensor[:1]  # First image only
                     
                     # Warmup
-                    for _ in range(3):
+                    for _ in range(10):
                         _ = self.model(single_input)
                     
                     # Time single image inference
@@ -190,7 +190,7 @@ class DepthCompletionTrainer:
                     
                     # Measure multiple runs for stability
                     single_times = []
-                    for _ in range(10):
+                    for _ in range(100):
                         torch.cuda.synchronize()
                         start_event.record()
                         _ = self.model(single_input)
@@ -199,6 +199,18 @@ class DepthCompletionTrainer:
                         single_times.append(start_event.elapsed_time(end_event))
                     
                     inference_times.extend(single_times)
+                    
+                    # Report single-image latency immediately
+                    avg_single = np.mean(single_times)
+                    std_single = np.std(single_times)
+                    print(f"\n{'='*60}")
+                    print(f"Single Image Inference Latency (batch_size=1):")
+                    print(f"  Average: {avg_single:.2f} ms per image")
+                    print(f"  Std Dev: {std_single:.2f} ms")
+                    print(f"  Min: {np.min(single_times):.2f} ms")
+                    print(f"  Max: {np.max(single_times):.2f} ms")
+                    print(f"  FPS (single image): {1000.0/avg_single:.1f}")
+                    print(f"{'='*60}\n")
                 
                 # Compute loss
                 rgb_warped = rgb  # Placeholder
@@ -354,11 +366,7 @@ class DepthCompletionTrainer:
                   f"rmse={val_losses['rmse']:.4f}m, "
                   f"δ₁={val_losses['a1']:.4f} ({val_losses['a1']*100:.1f}%)")
             
-            # Print latency information
-            if 'latency_mean' in val_losses:
-                fps = 1000 / val_losses['latency_mean']
-                print(f"Epoch {epoch} - Inference latency: {val_losses['latency_mean']:.1f}±{val_losses['latency_std']:.1f} ms "
-                      f"(min: {val_losses['latency_min']:.1f}, max: {val_losses['latency_max']:.1f}) → {fps:.1f} FPS")
+            # Latency was already printed during validation
             
             # Update learning rate
             self.scheduler.step(val_losses['total'])
