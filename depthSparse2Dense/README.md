@@ -86,7 +86,7 @@ python train_sparse_to_dense.py \
     --batch_size 64 \
     --learning_rate 3e-4 \
     --model unet
-
+(optinal --resume)
 # Monitor training with tensorboard
 tensorboard --logdir trained_models/runs
 ```

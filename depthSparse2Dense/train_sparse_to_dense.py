@@ -18,6 +18,7 @@ import json
 from slam_dataloader import create_dataloaders
 from unet_depth import DepthCompletionUNet, DepthCompletionNet
 from losses import SelfSupervisedDepthLoss, warp_frame
+from metrics import compute_depth_metrics
 
 
 class DepthCompletionTrainer:
@@ -152,8 +153,14 @@ class DepthCompletionTrainer:
         self.model.eval()
         val_losses = {'total': 0, 'photometric': 0, 'sparse': 0, 'smoothness': 0}
         
+        # Initialize metrics accumulators
+        val_metrics = {
+            'abs_rel': 0, 'sq_rel': 0, 'rmse': 0, 'rmse_log': 0,
+            'a1': 0, 'a2': 0, 'a3': 0
+        }
+        
         with torch.no_grad():
-            for batch in tqdm(self.val_loader, desc='Validation'):
+            for batch_idx, batch in enumerate(tqdm(self.val_loader, desc='Validation')):
                 # Move to device
                 rgb = batch['rgb'].to(self.device)
                 sparse_depth = batch['sparse_depth'].to(self.device)
@@ -171,29 +178,48 @@ class DepthCompletionTrainer:
                     pred_depth, sparse_depth, rgb, rgb_warped
                 )
                 
-                # Update metrics
+                # Update losses
                 for k, v in loss_dict.items():
                     val_losses[k] += v
                 
+                # Compute depth metrics on sparse points
+                metrics = compute_depth_metrics(
+                    pred_depth, sparse_depth, 
+                    valid_mask=(sparse_depth > 0)
+                )
+                
+                # Accumulate metrics
+                for k, v in metrics.items():
+                    val_metrics[k] += v
+                
                 # Save sample predictions
-                if epoch % 5 == 0 and batch['frame_id'][0] == 0:
+                if epoch % 5 == 0 and batch_idx == 0:
                     self.save_predictions(
                         rgb[0], sparse_depth[0], pred_depth[0], 
                         epoch, 'val'
                     )
         
-        # Average losses
+        # Average losses and metrics
         for k in val_losses:
             val_losses[k] /= len(self.val_loader)
+        for k in val_metrics:
+            val_metrics[k] /= len(self.val_loader)
         
         # Log to tensorboard
         for k, v in val_losses.items():
             self.writer.add_scalar(f'val/{k}', v, epoch)
+        for k, v in val_metrics.items():
+            self.writer.add_scalar(f'val/metrics/{k}', v, epoch)
+        
+        # Combine losses and metrics for return
+        val_losses.update(val_metrics)
         
         return val_losses
     
     def save_predictions(self, rgb, sparse, pred, epoch, split):
         """Save prediction visualizations"""
+        import matplotlib
+        matplotlib.use('Agg')  # Use non-interactive backend
         import matplotlib.pyplot as plt
         
         fig, axes = plt.subplots(1, 4, figsize=(20, 5))
@@ -257,7 +283,8 @@ class DepthCompletionTrainer:
         """Load training checkpoint"""
         checkpoint_path = self.output_dir / 'checkpoint_last.pth'
         if checkpoint_path.exists():
-            checkpoint = torch.load(checkpoint_path, map_location=self.device)
+            # Load with weights_only=False for compatibility with saved config
+            checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
             
             # Handle DataParallel wrapper when loading
             if hasattr(self.model, 'module'):
@@ -282,7 +309,15 @@ class DepthCompletionTrainer:
             
             # Validate
             val_losses = self.validate(epoch)
-            print(f"Epoch {epoch} - Val losses: {val_losses}")
+            
+            # Print validation losses
+            print(f"Epoch {epoch} - Val losses: total={val_losses['total']:.4f}, "
+                  f"sparse={val_losses['sparse']:.4f}, smooth={val_losses['smoothness']:.4f}")
+            
+            # Print validation metrics
+            print(f"Epoch {epoch} - Val metrics: abs_rel={val_losses['abs_rel']:.4f}, "
+                  f"rmse={val_losses['rmse']:.4f}m, "
+                  f"δ₁={val_losses['a1']:.4f} ({val_losses['a1']*100:.1f}%)")
             
             # Update learning rate
             self.scheduler.step(val_losses['total'])
