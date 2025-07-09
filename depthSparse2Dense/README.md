@@ -83,8 +83,8 @@ python train_sparse_to_dense.py \
     --data_dir sparse_depth_output \
     --output_dir trained_models \
     --epochs 100 \
-    --batch_size 8 \
-    --learning_rate 1e-4 \
+    --batch_size 64 \
+    --learning_rate 3e-4 \
     --model unet
 
 # Monitor training with tensorboard

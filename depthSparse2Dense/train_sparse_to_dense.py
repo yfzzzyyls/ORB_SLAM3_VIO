@@ -24,7 +24,15 @@ class DepthCompletionTrainer:
     def __init__(self, config):
         self.config = config
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        print(f"Using device: {self.device}")
+        
+        # Check for multiple GPUs
+        if torch.cuda.is_available():
+            n_gpus = torch.cuda.device_count()
+            print(f"Found {n_gpus} GPU(s)")
+            for i in range(n_gpus):
+                print(f"  GPU {i}: {torch.cuda.get_device_name(i)}")
+        else:
+            print(f"Using device: {self.device}")
         
         # Create output directory
         self.output_dir = Path(config.output_dir)
@@ -39,6 +47,11 @@ class DepthCompletionTrainer:
             self.model = DepthCompletionUNet(n_channels=4).to(self.device)
         else:
             self.model = DepthCompletionNet().to(self.device)
+        
+        # Wrap model with DataParallel if multiple GPUs available
+        if torch.cuda.device_count() > 1:
+            self.model = nn.DataParallel(self.model)
+            print(f"Using DataParallel with {torch.cuda.device_count()} GPUs")
         
         # Create dataloaders
         self.train_loader, self.val_loader = create_dataloaders(
@@ -221,9 +234,12 @@ class DepthCompletionTrainer:
     
     def save_checkpoint(self, epoch, is_best=False):
         """Save training checkpoint"""
+        # Handle DataParallel wrapper
+        model_state_dict = self.model.module.state_dict() if hasattr(self.model, 'module') else self.model.state_dict()
+        
         checkpoint = {
             'epoch': epoch,
-            'model_state_dict': self.model.state_dict(),
+            'model_state_dict': model_state_dict,
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scheduler_state_dict': self.scheduler.state_dict(),
             'best_loss': self.best_loss,
@@ -242,7 +258,13 @@ class DepthCompletionTrainer:
         checkpoint_path = self.output_dir / 'checkpoint_last.pth'
         if checkpoint_path.exists():
             checkpoint = torch.load(checkpoint_path, map_location=self.device)
-            self.model.load_state_dict(checkpoint['model_state_dict'])
+            
+            # Handle DataParallel wrapper when loading
+            if hasattr(self.model, 'module'):
+                self.model.module.load_state_dict(checkpoint['model_state_dict'])
+            else:
+                self.model.load_state_dict(checkpoint['model_state_dict'])
+            
             self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
             self.start_epoch = checkpoint['epoch'] + 1
