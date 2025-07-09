@@ -84,9 +84,9 @@ def merge_sequences(input_dirs, output_dir, train_ratio=0.9):
                 shutil.copy2(src_rgb, output_path / 'rgb' / f'{new_frame_str}.png')
             
             # Copy pose
-            src_pose = input_path / 'poses' / f'{frame_str}.txt'
+            src_pose = input_path / 'poses' / f'{frame_str}.npy'
             if src_pose.exists():
-                shutil.copy2(src_pose, output_path / 'poses' / f'{new_frame_str}.txt')
+                shutil.copy2(src_pose, output_path / 'poses' / f'{new_frame_str}.npy')
             
             all_frames.append(new_frame)
             global_frame_id += 1

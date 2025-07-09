@@ -63,8 +63,15 @@ echo ""
 # Step 4: Merge all sequences
 echo -e "${GREEN}Step 4: Merging sequences into training dataset${NC}"
 echo "----------------------------------------"
+# Use glob to expand the pattern and pass as input_dirs
+SPARSE_DIRS=$(ls -d sparse_depth_sequences/sparse_* 2>/dev/null)
+if [ -z "$SPARSE_DIRS" ]; then
+    echo -e "${RED}Error: No sparse depth sequences found${NC}"
+    exit 1
+fi
+
 python merge_sequences.py \
-    --pattern "sparse_depth_sequences/sparse_*" \
+    --input_dirs $SPARSE_DIRS \
     --output_dir "$MERGED_DATA_DIR" \
     --train_ratio 0.9
 echo ""
@@ -92,17 +99,13 @@ if [ -d "$MODEL_OUTPUT_DIR" ] && [ -f "$MODEL_OUTPUT_DIR/checkpoint_last.pth" ];
     RESUME_FLAG="--resume"
 fi
 
-# Determine batch size based on available GPUs
+# Use fixed batch size and learning rate as requested
+BATCH_SIZE=64
+LEARNING_RATE="3e-4"
+
+# Show GPU info
 N_GPUS=$(nvidia-smi -L 2>/dev/null | wc -l || echo 1)
-if [ "$N_GPUS" -gt 1 ]; then
-    BATCH_SIZE=$((32 * N_GPUS))
-    LEARNING_RATE="4e-4"
-    echo -e "Using ${YELLOW}$N_GPUS GPUs${NC} with batch size $BATCH_SIZE"
-else
-    BATCH_SIZE=32
-    LEARNING_RATE="2e-4"
-    echo -e "Using ${YELLOW}single GPU${NC} with batch size $BATCH_SIZE"
-fi
+echo -e "Using ${YELLOW}$N_GPUS GPU(s)${NC} with batch size $BATCH_SIZE and learning rate $LEARNING_RATE"
 
 python train_sparse_to_dense.py \
     --data_dir "$MERGED_DATA_DIR" \
