@@ -54,17 +54,40 @@ class SLAMDepthDataset(Dataset):
                 'cy': 235.65
             }
         
-        # Split data (80/20 train/val)
-        n_frames = len(self.frames)
-        indices = list(range(n_frames))
-        random.seed(42)
-        random.shuffle(indices)
-        
-        split_idx = int(0.8 * n_frames)
-        if split == 'train':
-            self.indices = indices[:split_idx]
+        # Check if this is a merged dataset with predefined splits
+        split_file = self.data_dir / 'metadata' / 'split.json'
+        if split_file.exists():
+            # Use predefined split from merge_sequences.py
+            with open(split_file, 'r') as f:
+                split_info = json.load(f)
+            
+            if split == 'train':
+                self.indices = split_info['train']
+            else:
+                self.indices = split_info['val']
+            
+            print(f"Using predefined split from merged dataset")
         else:
-            self.indices = indices[split_idx:]
+            # Default split for single sequence (80/20 train/val)
+            n_frames = len(self.frames)
+            indices = list(range(n_frames))
+            random.seed(42)
+            random.shuffle(indices)
+            
+            split_idx = int(0.8 * n_frames)
+            if split == 'train':
+                self.indices = indices[:split_idx]
+            else:
+                self.indices = indices[split_idx:]
+            
+        # Load sequence info if available (for merged datasets)
+        sequences_file = self.data_dir / 'metadata' / 'sequences.json'
+        if sequences_file.exists():
+            with open(sequences_file, 'r') as f:
+                self.sequences = json.load(f)
+            print(f"Loaded multi-sequence dataset with {len(self.sequences)} sequences")
+        else:
+            self.sequences = None
             
         # Load camera intrinsics
         self.K = np.load(self.data_dir / 'metadata' / 'intrinsics.npy')
@@ -136,7 +159,8 @@ class SLAMDepthDataset(Dataset):
         if self.transform:
             rgb = self.transform(rgb)
         
-        return {
+        # Build return dictionary
+        ret_dict = {
             'rgb': rgb,
             'sparse_depth': sparse_depth,
             'confidence': confidence,
@@ -147,6 +171,14 @@ class SLAMDepthDataset(Dataset):
             'num_sparse_points': frame_info.get('num_features', -1),
             'sparsity': frame_info.get('sparsity', 0.0)
         }
+        
+        # Add sequence information if available
+        if 'sequence' in frame_info:
+            ret_dict['sequence'] = frame_info['sequence']
+            ret_dict['sequence_idx'] = frame_info.get('sequence_idx', -1)
+            ret_dict['original_frame_id'] = frame_info.get('original_frame_id', frame_id)
+        
+        return ret_dict
     
     def _augment(self, rgb, sparse_depth, confidence):
         """Apply data augmentation"""
