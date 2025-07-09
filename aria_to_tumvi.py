@@ -116,7 +116,9 @@ def convert_aria_to_tumvi(vrs_path, output_dir, start_time=0, duration=None, rec
                     image_array, pinhole_calib, camera_calib
                 )
             
-            # Rotate 90° clockwise (Aria cameras are mounted sideways)
+            # Rotate 90° clockwise (k=3) - Aria cameras are mounted sideways
+            # Original: 640x480 landscape (sideways view)
+            # After rotation: 480x640 portrait (natural human view)
             rotated_image = np.rot90(image_array, k=3)
             
             filename = f"{timestamp_ns}.png"

@@ -86,12 +86,9 @@ class SLAMDepthDataset(Dataset):
             rgb = cv2.imread(str(rgb_path))
             rgb = cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB)
             
-            # Apply 90-degree clockwise rotation for Aria cameras (sideways mounted)
-            # This makes the image natural human view
-            # Note: cv2.ROTATE_90_CLOCKWISE rotates and swaps dimensions
-            # Original: 640x480 -> After rotation: 480x640
-            if rgb.shape[0] > rgb.shape[1]:  # If height > width, it needs rotation
-                rgb = cv2.rotate(rgb, cv2.ROTATE_90_CLOCKWISE)
+            # The RGB images are already in correct orientation (640x480)
+            # But sparse depth is 480x640, so we need to transpose the sparse depth
+            # or resize RGB to match. Let's resize RGB to match sparse depth dimensions
         else:
             # Create blank image if RGB not available
             h = self.camera_params['height']

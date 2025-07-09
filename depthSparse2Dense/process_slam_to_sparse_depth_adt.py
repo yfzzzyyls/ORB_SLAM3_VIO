@@ -19,13 +19,14 @@ class SLAMDataProcessorADT:
         self.output_dir = Path(output_dir)
         
         # ADT SLAM camera parameters (after 90° rotation)
+        # Original: 640x480, After rotation: 480x640 (portrait)
         self.camera_params = {
-            'width': 640,
-            'height': 480,
+            'width': 480,
+            'height': 640,
             'fx': 242.7,
             'fy': 242.7,
-            'cx': 318.08,
-            'cy': 235.65
+            'cx': 235.65,  # Principal point also rotates
+            'cy': 318.08   # cx and cy are swapped due to rotation
         }
         
         # Create output directories
