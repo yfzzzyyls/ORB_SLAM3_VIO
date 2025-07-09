@@ -1,7 +1,8 @@
 %YAML:1.0
 
 #--------------------------------------------------------------------------------------------
-# Camera Parameters for Aria SLAM cameras (after 90° clockwise rotation)
+# Camera Parameters for Aria Digital Twin (ADT) SLAM cameras (after 90° clockwise rotation)
+# Updated for ADT dataset: 30Hz camera, 1000Hz IMU (2025-01-08)
 #--------------------------------------------------------------------------------------------
 File.version: "1.0"
 
@@ -26,8 +27,8 @@ Camera1.k4: 0.0133687     # Aria k5
 Camera.width: 480
 Camera.height: 640
 
-# Camera frame rate
-Camera.fps: 10
+# Camera frame rate (ADT SLAM cameras run at 30Hz)
+Camera.fps: 30
 
 # Color order (0: BGR, 1: RGB. Ignored for grayscale)
 Camera.RGB: 1
@@ -48,7 +49,7 @@ IMU.NoiseGyro: 1.6968e-4      # rad/s/√Hz (TUM-VI gyroscope noise density)
 IMU.NoiseAcc: 2.8000e-3       # m/s²/√Hz (TUM-VI accelerometer noise density)
 IMU.GyroWalk: 1.9393e-5       # rad/s²/√Hz (TUM-VI gyroscope random walk)
 IMU.AccWalk: 8.6000e-4        # m/s³/√Hz (TUM-VI accelerometer random walk)
-IMU.Frequency: 200.0          # Hz (downsampled for ORB-SLAM3)
+IMU.Frequency: 1000.0         # Hz (native ADT IMU rate)
 
 #--------------------------------------------------------------------------------------------
 # ORB Parameters
