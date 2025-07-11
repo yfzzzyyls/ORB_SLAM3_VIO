@@ -88,9 +88,35 @@ echo -e "Total merged frames: ${YELLOW}$N_FRAMES${NC}"
 echo ""
 
 # Step 5: Train the model
-echo -e "${GREEN}Step 5: Training sparse-to-dense model${NC}"
+echo -e "${GREEN}Step 5: Extracting ground truth depth${NC}"
+echo "----------------------------------------"
+echo -e "${YELLOW}Extracting 640x480 SLAM camera depth from ADT${NC}"
+
+# Check if ground truth already exists
+GT_DIR="$MERGED_DATA_DIR/ground_truth_depth"
+if [ -d "$GT_DIR" ] && [ "$(ls -A $GT_DIR 2>/dev/null | wc -l)" -gt 1000 ]; then
+    echo "Ground truth already extracted, skipping..."
+    GT_COUNT=$(ls -1 "$GT_DIR"/*.npz 2>/dev/null | wc -l || echo "0")
+else
+    # Extract ground truth directly to merged data
+    python extract_ground_truth_direct_to_merged.py --tolerance_ms 50
+    
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}Error extracting ground truth${NC}"
+        exit 1
+    fi
+    GT_COUNT=$(ls -1 "$GT_DIR"/*.npz 2>/dev/null | wc -l || echo "0")
+fi
+
+echo "Ground truth files: $GT_COUNT"
+echo ""
+
+echo -e "${GREEN}Step 6: Training sparse-to-dense model${NC}"
 echo "----------------------------------------"
 echo -e "${YELLOW}Note: Training on 8 sequences with 90/10 train/val split${NC}"
+if [ "$GT_COUNT" -gt 0 ]; then
+    echo -e "${YELLOW}Using hybrid validation: sparse every epoch, full GT every 5 epochs${NC}"
+fi
 
 # Check for existing checkpoint
 RESUME_FLAG=""
@@ -114,6 +140,7 @@ python train_sparse_to_dense.py \
     --batch_size "$BATCH_SIZE" \
     --learning_rate "$LEARNING_RATE" \
     --model unet \
+    --full_gt_eval_freq 5 \
     $RESUME_FLAG
 
 echo ""
@@ -125,6 +152,7 @@ echo "Summary:"
 echo "  - Training sequences: $N_SEQUENCES (will be split 90/10 for train/val)"
 echo "  - Test sequences: $N_TEST_SEQUENCES (held out for final evaluation)"
 echo "  - Total training frames: $N_FRAMES"
+echo "  - Ground truth frames: $GT_COUNT (~$(echo "scale=1; $GT_COUNT*100/$N_FRAMES" | bc)%)"
 echo "  - Model output: $MODEL_OUTPUT_DIR"
 echo ""
 echo "Next steps:"

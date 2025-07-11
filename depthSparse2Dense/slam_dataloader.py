@@ -17,7 +17,7 @@ class SLAMDepthDataset(Dataset):
     """Dataset for sparse-to-dense depth training from SLAM outputs"""
     
     def __init__(self, data_dir, split='train', transform=None, 
-                 load_poses=True, augment=True, target_size=None):
+                 load_poses=True, augment=True, target_size=None, load_gt=False):
         """
         Args:
             data_dir: Directory with processed SLAM data (from process_slam_to_sparse_depth_adt.py)
@@ -26,6 +26,7 @@ class SLAMDepthDataset(Dataset):
             load_poses: Whether to load camera poses
             augment: Whether to apply data augmentation
             target_size: (H, W) tuple for resizing, None to keep original
+            load_gt: Whether to load ground truth depth
         """
         self.data_dir = Path(data_dir)
         self.split = split
@@ -33,6 +34,11 @@ class SLAMDepthDataset(Dataset):
         self.load_poses = load_poses
         self.augment = augment
         self.target_size = target_size
+        self.load_gt = load_gt
+        
+        # Check if ground truth directory exists
+        self.gt_dir = self.data_dir / 'ground_truth_depth'
+        self.has_gt = self.gt_dir.exists() and load_gt
         
         # Load metadata
         with open(self.data_dir / 'metadata' / 'frames.json', 'r') as f:
@@ -160,6 +166,27 @@ class SLAMDepthDataset(Dataset):
             rgb = self.transform(rgb)
         
         # Build return dictionary
+        # Load ground truth if available
+        gt_depth = None
+        if self.has_gt:
+            gt_path = self.gt_dir / f'{frame_str}.npz'
+            if gt_path.exists():
+                gt_data = np.load(gt_path)
+                gt_depth = gt_data['depth'].astype(np.float32)
+                # Ensure GT matches expected dimensions (sparse depth is 640x480)
+                expected_shape = (self.camera_params['height'], self.camera_params['width'])
+                if gt_depth.shape != expected_shape:
+                    # GT is likely 640x480 but we need height x width order
+                    if gt_depth.shape == (expected_shape[1], expected_shape[0]):
+                        gt_depth = gt_depth.T  # Transpose if dimensions are swapped
+                    else:
+                        # Resize if different size
+                        gt_depth = cv2.resize(gt_depth, (expected_shape[1], expected_shape[0]), 
+                                            interpolation=cv2.INTER_NEAREST)
+            else:
+                # Create zero GT if file not found
+                gt_depth = np.zeros((self.camera_params['height'], self.camera_params['width']), dtype=np.float32)
+        
         ret_dict = {
             'rgb': rgb,
             'sparse_depth': sparse_depth,
@@ -171,6 +198,11 @@ class SLAMDepthDataset(Dataset):
             'num_sparse_points': frame_info.get('num_features', -1),
             'sparsity': frame_info.get('sparsity', 0.0)
         }
+        
+        if gt_depth is not None:
+            # Convert to tensor
+            gt_depth = torch.from_numpy(gt_depth.copy()).unsqueeze(0).float()
+            ret_dict['gt_depth'] = gt_depth
         
         # Add sequence information if available
         if 'sequence' in frame_info:
@@ -264,7 +296,7 @@ class SequentialSLAMDataset(Dataset):
 
 
 def create_dataloaders(data_dir, batch_size=8, num_workers=4, 
-                      sequential=False, sequence_length=3, target_size=None):
+                      sequential=False, sequence_length=3, target_size=None, load_gt=False):
     """Create train and validation dataloaders
     
     Args:
@@ -274,6 +306,7 @@ def create_dataloaders(data_dir, batch_size=8, num_workers=4,
         sequential: Whether to use sequential dataset
         sequence_length: Length of sequences if sequential
         target_size: (H, W) tuple for resizing, None to keep original ADT size
+        load_gt: Whether to load ground truth depth
     """
     
     if sequential:
@@ -292,8 +325,8 @@ def create_dataloaders(data_dir, batch_size=8, num_workers=4,
             target_size=target_size
         )
     else:
-        train_dataset = SLAMDepthDataset(data_dir, split='train', augment=True, target_size=target_size)
-        val_dataset = SLAMDepthDataset(data_dir, split='val', augment=False, target_size=target_size)
+        train_dataset = SLAMDepthDataset(data_dir, split='train', augment=True, target_size=target_size, load_gt=load_gt)
+        val_dataset = SLAMDepthDataset(data_dir, split='val', augment=False, target_size=target_size, load_gt=load_gt)
     
     train_loader = DataLoader(
         train_dataset,

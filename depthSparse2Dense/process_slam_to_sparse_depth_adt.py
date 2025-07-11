@@ -18,15 +18,17 @@ class SLAMDataProcessorADT:
         self.tumvi_dir = Path(tumvi_dir)
         self.output_dir = Path(output_dir)
         
-        # ADT SLAM camera parameters (after 90° rotation)
+        # ADT SLAM camera parameters (after 90° rotation) - CORRECTED VALUES
         # Original: 640x480, After rotation: 480x640 (portrait)
+        # ADT true values: fx=241.092481, cx=316.638312, cy=237.024868 (640x480)
+        # After rotation: fx stays same, (cx,cy) -> (480-cy, cx)
         self.camera_params = {
             'width': 480,
             'height': 640,
-            'fx': 242.7,
-            'fy': 242.7,
-            'cx': 235.65,  # Principal point also rotates
-            'cy': 318.08   # cx and cy are swapped due to rotation
+            'fx': 241.092481,
+            'fy': 241.092481,
+            'cx': 242.975132,  # 480 - 237.024868
+            'cy': 316.638312   # original cx
         }
         
         # Create output directories
@@ -83,7 +85,7 @@ class SLAMDataProcessorADT:
         
         valid_points = 0
         for feat in features:
-            if feat['depth'] > 0 and feat['depth'] < 10.0:  # Valid depth
+            if feat['depth'] > 0:  # Valid depth (positive values only)
                 u, v = int(round(feat['u'])), int(round(feat['v']))
                 if 0 <= u < width and 0 <= v < height:
                     # Use maximum depth if multiple features project to same pixel

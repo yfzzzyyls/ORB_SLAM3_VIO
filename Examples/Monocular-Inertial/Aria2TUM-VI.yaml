@@ -9,12 +9,14 @@ File.version: "1.0"
 # Camera model - KannalaBrandt8 for fisheye/wide-angle cameras
 Camera.type: "KannalaBrandt8"
 
-# Camera intrinsics after 90° clockwise rotation
+# Camera intrinsics after 90° clockwise rotation - CORRECTED VALUES
 # Original: 640x480 -> Rotated: 480x640
-Camera1.fx: 242.704
-Camera1.fy: 242.704
-Camera1.cx: 235.65
-Camera1.cy: 318.078
+# ADT true values: fx=241.092481, cx=316.638312, cy=237.024868 (640x480)
+# After rotation: fx stays same, (cx,cy) -> (480-cy, cx)
+Camera1.fx: 241.092481
+Camera1.fy: 241.092481
+Camera1.cx: 242.975132   # 480 - 237.024868
+Camera1.cy: 316.638312   # original cx
 
 # Kannala-Brandt distortion parameters
 # Mapped from Aria's projection parameters
