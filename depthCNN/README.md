@@ -5,8 +5,9 @@ This project implements RT-MonoDepth-S for metric depth prediction using the Ari
 ## Dataset Information
 
 ADT provides:
-- RGB images: 1408×1408 at 20Hz from camera-rgb (214-1)
+- RGB images: 1408×1408 at 30Hz from camera-rgb (214-1)
 - Depth maps: 1408×1408 synthetic ground truth depth
+- Gaze data: Eye tracking pitch/yaw angles from eyegaze.csv files
 - Depth format: 16-bit uint millimeters (divide by 1000 for meters)
 - Depth range: 0-7.6 meters (typical indoor scenes)
 - Timestamp offset: Depth recording starts ~10-16 seconds after RGB
@@ -17,9 +18,10 @@ The dataset has been extracted with timestamp-based matching:
 - **Train**: 7 sequences (~20,154 RGB-depth pairs)
 - **Val**: 1 sequence (~2,881 pairs)
 - **Test**: 2 sequences (~5,731 pairs)
-- **Total**: ~28,766 matched RGB-depth pairs at full 20Hz
-- **Quality**: 1-to-1 RGB-depth matching with 0.1ms average time difference
+- **Total**: ~28,766 matched RGB-depth pairs at full 30Hz
+- **Quality**: 1-to-1 RGB-depth matching with 1ms tolerance
 - **Coverage**: ~86% valid depth pixels per frame
+- **Gaze data**: Pitch/yaw angles converted to pixel coordinates (x, y)
 
 ## Quick Start
 
@@ -33,7 +35,7 @@ conda activate orbslam
 ### 2. Extract Data (if not already done)
 ```bash
 # Uses timestamp-based matching to handle RGB-depth time offset
-python extract_dataset.py  # All defaults configured for full 20Hz extraction
+python extract_dataset.py  # All defaults configured for full 30Hz extraction
 ```
 
 ### 3. Train Model
@@ -67,16 +69,17 @@ python export_tensorrt.py \
 - **Input**: Full 1408×1408 resolution (no cropping)
 - **Loss**: Scale-Invariant Log loss (SI-Log) with α=0.85
 - **Output**: Depth predictions scaled to [0.1, 10.0] meters
-- **Training**: ~20,000 frames at 20Hz (10x more than 2Hz subsampling)
+- **Training**: ~20,000 frames at 30Hz (15x more than 2Hz subsampling)
 
 ## Data Pipeline
 
-1. Load RGB (PNG) and depth (NPZ) from processed_data/
+1. Load RGB (PNG), depth (NPZ), and gaze (JSON) from processed_data/
 2. Convert depth: `depth_m = depth_uint16.float() / 1000.0`
 3. Create valid mask: `valid = depth > 0`
-4. Apply data augmentation (random horizontal flip)
-5. Normalize RGB to [0, 1]
-6. No cropping - use full 1408×1408 resolution
+4. Load gaze data: pitch/yaw angles and (x, y) pixel coordinates
+5. Apply data augmentation (random horizontal flip)
+6. Normalize RGB to [0, 1]
+7. No cropping - use full 1408×1408 resolution
 
 ## Key Implementation Details
 

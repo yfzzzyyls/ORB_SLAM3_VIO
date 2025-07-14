@@ -2,6 +2,7 @@
 """
 Extract and organize ADT dataset into train/val/test folders for easier access.
 Extracts RGB and depth images from VRS files and saves them as PNG/NPZ files.
+Also extracts gaze information from eyegaze.csv files.
 """
 
 import os
@@ -13,15 +14,110 @@ import argparse
 from tqdm import tqdm
 import json
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from typing import List, Tuple
+from typing import List, Tuple, Dict, Optional
+import pandas as pd
 
 # Fix projectaria_tools import
 sys.path.append('/home/external/.local/lib/python3.9/site-packages')
 from projectaria_tools.core import data_provider
 
 
+def load_gaze_data(eyegaze_csv_path: Path) -> pd.DataFrame:
+    """
+    Load gaze data from eyegaze.csv file.
+    Returns DataFrame with columns: tracking_timestamp_us, yaw_rads_cpf, pitch_rads_cpf
+    """
+    if not eyegaze_csv_path.exists():
+        return None
+    
+    # Load only the columns we need
+    gaze_df = pd.read_csv(eyegaze_csv_path, usecols=[
+        'tracking_timestamp_us', 
+        'yaw_rads_cpf', 
+        'pitch_rads_cpf'
+    ])
+    
+    # Convert timestamp from microseconds to nanoseconds for consistency
+    gaze_df['timestamp_ns'] = gaze_df['tracking_timestamp_us'] * 1000
+    
+    return gaze_df
+
+
+def pitch_yaw_to_pixel_coords(pitch_rad: float, yaw_rad: float, 
+                              width: int = 1408, height: int = 1408,
+                              fov_degrees: float = 110.0) -> Tuple[int, int]:
+    """
+    Convert pitch/yaw angles to pixel coordinates for RGB camera.
+    
+    Args:
+        pitch_rad: Pitch angle in radians (positive down)
+        yaw_rad: Yaw angle in radians (positive right)
+        width: Image width in pixels (1408 for ADT RGB)
+        height: Image height in pixels (1408 for ADT RGB)
+        fov_degrees: Field of view in degrees (110 for ADT RGB camera)
+    
+    Returns:
+        (x, y) pixel coordinates, or (-1, -1) if outside image bounds
+    """
+    # Convert FOV to radians
+    fov_rad = np.radians(fov_degrees)
+    
+    # Calculate focal length in pixels (assuming square pixels)
+    focal_length = (width / 2) / np.tan(fov_rad / 2)
+    
+    # Project to image plane
+    # Note: ADT uses different conventions, may need to adjust signs
+    x = focal_length * np.tan(yaw_rad) + width / 2
+    y = focal_length * np.tan(pitch_rad) + height / 2
+    
+    # Round to integer pixel coordinates
+    x_pixel = int(round(x))
+    y_pixel = int(round(y))
+    
+    # Check if within image bounds
+    if 0 <= x_pixel < width and 0 <= y_pixel < height:
+        return x_pixel, y_pixel
+    else:
+        return -1, -1
+
+
+def find_nearest_gaze_point(rgb_timestamp_ns: int, gaze_df: pd.DataFrame,
+                           tolerance_ns: int = 1_000_000) -> Optional[Dict]:
+    """
+    Find the nearest gaze point for a given RGB timestamp.
+    Returns dict with gaze info or None if no match within tolerance.
+    """
+    if gaze_df is None or len(gaze_df) == 0:
+        return None
+    
+    # Find nearest timestamp
+    time_diffs = np.abs(gaze_df['timestamp_ns'] - rgb_timestamp_ns)
+    min_idx = time_diffs.idxmin()
+    min_diff = time_diffs[min_idx]
+    
+    if min_diff <= tolerance_ns:
+        gaze_row = gaze_df.iloc[min_idx]
+        
+        # Convert pitch/yaw to pixel coordinates
+        x_pixel, y_pixel = pitch_yaw_to_pixel_coords(
+            gaze_row['pitch_rads_cpf'],
+            gaze_row['yaw_rads_cpf']
+        )
+        
+        return {
+            'timestamp_us': int(gaze_row['tracking_timestamp_us']),
+            'pitch_rad': float(gaze_row['pitch_rads_cpf']),
+            'yaw_rad': float(gaze_row['yaw_rads_cpf']),
+            'x_pixel': x_pixel,
+            'y_pixel': y_pixel,
+            'time_diff_ms': float(min_diff / 1e6)
+        }
+    
+    return None
+
+
 def find_nearest_depth_frame(rgb_timestamp_ns, depth_provider, depth_stream_id, 
-                           tolerance_ns=50_000_000):  # 50ms tolerance
+                           tolerance_ns=1_000_000):  # 1ms tolerance
     """
     Find the nearest depth frame for a given RGB timestamp.
     Returns (depth_index, time_diff_ns) or (None, None) if no match within tolerance.
@@ -80,18 +176,23 @@ def extract_sequence(seq_info: dict) -> dict:
     seq_output_dir = output_dir / seq_name
     rgb_dir = seq_output_dir / 'rgb'
     depth_dir = seq_output_dir / 'depth'
+    gaze_dir = seq_output_dir / 'gaze'
     rgb_dir.mkdir(parents=True, exist_ok=True)
     depth_dir.mkdir(parents=True, exist_ok=True)
+    gaze_dir.mkdir(parents=True, exist_ok=True)
     
-    # Find VRS files
+    # Find VRS files and gaze data
     rgb_vrs = None
     depth_vrs = None
+    eyegaze_csv = None
     
     for file in os.listdir(seq_dir):
         if file.endswith('_main_recording.vrs'):
             rgb_vrs = seq_dir / file
         elif file == 'depth_images.vrs':
             depth_vrs = seq_dir / file
+        elif file == 'eyegaze.csv':
+            eyegaze_csv = seq_dir / file
     
     if not rgb_vrs or not depth_vrs:
         return {
@@ -136,9 +237,17 @@ def extract_sequence(seq_info: dict) -> dict:
         
         print(f"\n{seq_name}: RGB={num_rgb_frames}, Depth={num_depth_frames}")
         
+        # Load gaze data if available
+        gaze_df = None
+        if eyegaze_csv:
+            gaze_df = load_gaze_data(eyegaze_csv)
+            if gaze_df is not None:
+                print(f"  Loaded {len(gaze_df)} gaze samples")
+        
         # Process RGB frames with subsampling
         extracted_count = 0
         matched_count = 0
+        gaze_matched_count = 0
         frame_indices = range(0, num_rgb_frames, subsample)
         
         # Save metadata
@@ -148,6 +257,7 @@ def extract_sequence(seq_info: dict) -> dict:
             'subsample': subsample,
             'rgb_shape': None,
             'depth_shape': None,
+            'has_gaze': gaze_df is not None,
             'frames': []
         }
         
@@ -188,8 +298,21 @@ def extract_sequence(seq_info: dict) -> dict:
                 depth_path = depth_dir / depth_filename
                 np.savez_compressed(depth_path, depth=depth_image)
                 
+                # Find matching gaze point
+                gaze_info = None
+                gaze_filename = None
+                if gaze_df is not None:
+                    gaze_info = find_nearest_gaze_point(rgb_timestamp_ns, gaze_df)
+                    if gaze_info:
+                        gaze_matched_count += 1
+                        # Save gaze info as JSON
+                        gaze_filename = f"frame_{extracted_count:06d}.json"
+                        gaze_path = gaze_dir / gaze_filename
+                        with open(gaze_path, 'w') as f:
+                            json.dump(gaze_info, f, indent=2)
+                
                 # Add to metadata
-                metadata['frames'].append({
+                frame_metadata = {
                     'index': extracted_count,
                     'rgb_index': rgb_idx,
                     'depth_index': depth_idx,
@@ -198,7 +321,15 @@ def extract_sequence(seq_info: dict) -> dict:
                     'time_diff_ms': float(time_diff / 1e6),
                     'rgb': rgb_filename,
                     'depth': depth_filename
-                })
+                }
+                
+                if gaze_filename:
+                    frame_metadata['gaze'] = gaze_filename
+                    frame_metadata['has_gaze'] = True
+                else:
+                    frame_metadata['has_gaze'] = False
+                
+                metadata['frames'].append(frame_metadata)
                 
                 extracted_count += 1
                 
@@ -217,6 +348,8 @@ def extract_sequence(seq_info: dict) -> dict:
             json.dump(metadata, f, indent=2)
         
         print(f"  Matched {matched_count}/{len(frame_indices)} RGB frames to depth")
+        if gaze_df is not None:
+            print(f"  Matched {gaze_matched_count}/{extracted_count} frames to gaze")
         print(f"  Extracted {extracted_count} frame pairs")
         
         return {
@@ -224,7 +357,9 @@ def extract_sequence(seq_info: dict) -> dict:
             'status': 'success',
             'extracted_frames': extracted_count,
             'total_rgb_frames': len(frame_indices),
-            'matched_frames': matched_count
+            'matched_frames': matched_count,
+            'gaze_matched_frames': gaze_matched_count,
+            'has_gaze': gaze_df is not None
         }
         
     except Exception as e:
@@ -260,17 +395,33 @@ def main():
     for dir_path in [train_dir, val_dir, test_dir]:
         dir_path.mkdir(parents=True, exist_ok=True)
     
-    # Find all sequences
-    all_sequences = sorted([
-        d for d in os.listdir(data_root)
-        if d.startswith("Apartment_release_clean_seq") and 
-        os.path.isdir(os.path.join(data_root, d))
-    ])[:10]  # Use first 10 sequences
+    # Find all sequences in train and test subdirectories
+    train_sequences = []
+    val_sequences = []
+    test_sequences = []
     
-    # Split sequences: 7 train, 1 val, 2 test
-    train_sequences = all_sequences[:7]
-    val_sequences = all_sequences[7:8]
-    test_sequences = all_sequences[8:10]
+    # Check train directory
+    train_path = data_root / 'train'
+    if train_path.exists():
+        train_seqs = sorted([
+            d for d in os.listdir(train_path)
+            if d.startswith("Apartment_release_clean_seq") and 
+            os.path.isdir(os.path.join(train_path, d))
+        ])
+        # Use first 7 for train, next 1 for val
+        train_sequences = train_seqs[:7]
+        val_sequences = train_seqs[7:8] if len(train_seqs) > 7 else []
+    
+    # Check test directory
+    test_path = data_root / 'test'
+    if test_path.exists():
+        test_sequences = sorted([
+            d for d in os.listdir(test_path)
+            if d.startswith("Apartment_release_clean_seq") and 
+            os.path.isdir(os.path.join(test_path, d))
+        ])[:2]  # Use first 2 test sequences
+    
+    all_sequences = train_sequences + val_sequences + test_sequences
     
     print(f"Found {len(all_sequences)} sequences")
     print(f"Train: {len(train_sequences)} sequences")
@@ -288,9 +439,15 @@ def main():
         print(f"\n{split_name.upper()} sequences:")
         for seq in sequences:
             print(f"  - {seq}")
+            # Determine the correct source directory
+            if split_name in ['train', 'val']:
+                seq_dir = data_root / 'train' / seq
+            else:  # test
+                seq_dir = data_root / 'test' / seq
+            
             tasks.append({
                 'seq_name': seq,
-                'seq_dir': data_root / seq,
+                'seq_dir': seq_dir,
                 'output_dir': output_dir,
                 'subsample': args.subsample
             })
