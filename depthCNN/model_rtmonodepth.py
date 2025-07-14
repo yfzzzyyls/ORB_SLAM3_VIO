@@ -15,8 +15,9 @@ from pathlib import Path
 # Add RT-MonoDepth to path
 sys.path.insert(0, str(Path(__file__).parent / "RT-MonoDepth"))
 
-from networks.RTMonoDepth.RTMonoDepth_s import DepthEncoder, DepthDecoder
+from networks.RTMonoDepth.RTMonoDepth_s import DepthEncoder
 from layers import disp_to_depth
+from rt_monodepth_fixed import DepthDecoderFixed as DepthDecoder
 
 
 class RTMonoDepthS(nn.Module):

@@ -40,14 +40,34 @@ python extract_dataset.py  # All defaults configured for full 30Hz extraction
 
 ### 3. Train Model
 ```bash
+# Single GPU
 python train.py \
     --data-root ./processed_data \
     --epochs 20 \
     --batch-size 4 \
     --lr 1e-4 \
     --crop-size 1408
+
+# Multi-GPU (automatically uses all available GPUs)
+python train.py \
+    --data-root ./processed_data \
+    --epochs 20 \
+    --batch-size 16 \
+    --lr 2e-4 \
+    --crop-size 1408
+
+# Specific GPUs only
+CUDA_VISIBLE_DEVICES=0,1,2,3 python train.py \
+    --data-root ./processed_data \
+    --epochs 20 \
+    --batch-size 16 \
+    --lr 2e-4 \
+    --crop-size 1408
 ```
-Note: Use batch-size 4 for full resolution. Increase to 8-16 if using smaller crops.
+Note: 
+- Single GPU: Use batch-size 4 for full resolution
+- Multi-GPU: Can use batch-size 16 (4 per GPU) or higher
+- Learning rate scales with batch size (2x batch → ~1.4-2x lr)
 
 ### 4. Evaluate
 ```bash

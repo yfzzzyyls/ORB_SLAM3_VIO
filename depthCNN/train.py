@@ -66,9 +66,12 @@ def save_checkpoint(model, optimizer, epoch, metrics, checkpoint_dir, is_best=Fa
     """Save model checkpoint."""
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     
+    # Handle DataParallel
+    model_state_dict = model.module.state_dict() if hasattr(model, 'module') else model.state_dict()
+    
     checkpoint = {
         'epoch': epoch,
-        'model_state_dict': model.state_dict(),
+        'model_state_dict': model_state_dict,
         'optimizer_state_dict': optimizer.state_dict(),
         'metrics': metrics
     }
@@ -231,7 +234,9 @@ def main():
     
     # Device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    n_gpus = torch.cuda.device_count()
     logger.info(f"Using device: {device}")
+    logger.info(f"Available GPUs: {n_gpus}")
     
     # Create datasets
     logger.info("Creating datasets...")
@@ -300,9 +305,20 @@ def main():
     # Create model
     logger.info("Creating model...")
     model = RTMonoDepthS(max_depth=args.max_depth, min_depth=args.min_depth)
+    
+    # Move model to device first before DataParallel
     model = model.to(device)
     
-    num_params = model.get_num_params()
+    # Multi-GPU support
+    if n_gpus > 1:
+        logger.info(f"Using DataParallel with {n_gpus} GPUs")
+        model = nn.DataParallel(model)
+    
+    # Get number of parameters
+    if hasattr(model, 'module'):
+        num_params = model.module.get_num_params()
+    else:
+        num_params = model.get_num_params()
     logger.info(f"Model parameters: {num_params:,} ({num_params/1e6:.2f}M)")
     
     # Loss function
@@ -329,7 +345,13 @@ def main():
     if args.resume:
         logger.info(f"Resuming from checkpoint: {args.resume}")
         checkpoint = torch.load(args.resume, map_location=device)
-        model.load_state_dict(checkpoint['model_state_dict'])
+        
+        # Handle DataParallel when loading
+        if hasattr(model, 'module'):
+            model.module.load_state_dict(checkpoint['model_state_dict'])
+        else:
+            model.load_state_dict(checkpoint['model_state_dict'])
+            
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         start_epoch = checkpoint['epoch'] + 1
         if 'metrics' in checkpoint and 'abs_rel' in checkpoint['metrics']:
