@@ -15,6 +15,7 @@ import cv2
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 from datetime import datetime
+import time
 from typing import Dict, List
 
 # Add project to path
@@ -116,6 +117,7 @@ def evaluate_model(model, test_loader, device, outputs_dir: Path, save_samples: 
     all_metrics = []
     total_samples = 0
     saved_samples = 0
+    forward_times = []
     
     with torch.no_grad():
         progress = tqdm(test_loader, desc="Evaluating")
@@ -125,9 +127,22 @@ def evaluate_model(model, test_loader, device, outputs_dir: Path, save_samples: 
             depth = batch['depth'].to(device)
             valid_mask = batch['valid_mask'].to(device)
             
+            # Time the forward pass
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            start_time = time.time()
+            
             # Forward pass
             outputs = model(rgb)
             pred_depth = outputs['depth']
+            
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            end_time = time.time()
+            
+            # Record forward pass time (in milliseconds) - skip first few batches for warmup
+            if batch_idx >= 5:  # Skip first 5 batches for GPU warmup
+                forward_times.append((end_time - start_time) * 1000)
             
             # Compute metrics
             metrics = DepthMetrics.compute_metrics(pred_depth, depth, valid_mask)
@@ -159,7 +174,20 @@ def evaluate_model(model, test_loader, device, outputs_dir: Path, save_samples: 
             'max': np.max(values)
         }
     
-    return avg_metrics, total_samples
+    # Add latency statistics
+    latency_stats = {}
+    if forward_times:
+        latency_stats = {
+            'mean': np.mean(forward_times),
+            'std': np.std(forward_times),
+            'median': np.median(forward_times),
+            'min': np.min(forward_times),
+            'max': np.max(forward_times),
+            'p95': np.percentile(forward_times, 95),
+            'p99': np.percentile(forward_times, 99)
+        }
+    
+    return avg_metrics, total_samples, latency_stats
 
 
 def main():
@@ -202,7 +230,7 @@ def main():
     print(f"Loading model from: {args.checkpoint}")
     model = RTMonoDepthS(max_depth=args.max_depth, min_depth=args.min_depth)
     
-    checkpoint = torch.load(args.checkpoint, map_location=device)
+    checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
     model.load_state_dict(checkpoint['model_state_dict'])
     model = model.to(device)
     
@@ -232,7 +260,7 @@ def main():
     
     # Evaluate
     print("\nEvaluating model...")
-    metrics, total_samples = evaluate_model(
+    metrics, total_samples, latency_stats = evaluate_model(
         model, test_loader, device, qualitative_dir, args.save_samples
     )
     
@@ -247,12 +275,26 @@ def main():
         print(f"{metric:>10}: {stats['mean']:>8.3f} ± {stats['std']:>6.3f} " +
               f"[{stats['min']:>8.3f}, {stats['max']:>8.3f}]")
     
+    # Print latency statistics
+    if latency_stats:
+        print("\nLatency Statistics (per frame):")
+        print("-" * 60)
+        print(f"Mean:       {latency_stats['mean']:.2f} ms")
+        print(f"Std:        {latency_stats['std']:.2f} ms")
+        print(f"Median:     {latency_stats['median']:.2f} ms")
+        print(f"Min:        {latency_stats['min']:.2f} ms")
+        print(f"Max:        {latency_stats['max']:.2f} ms")
+        print(f"95th %ile:  {latency_stats['p95']:.2f} ms")
+        print(f"99th %ile:  {latency_stats['p99']:.2f} ms")
+        print(f"\nThroughput: {1000.0/latency_stats['mean']:.1f} FPS")
+    
     # Save results
     results = {
         'checkpoint': args.checkpoint,
         'dataset': args.data_root,
         'test_samples': total_samples,
         'metrics': metrics,
+        'latency_ms': latency_stats if latency_stats else None,
         'timestamp': datetime.now().isoformat(),
         'args': vars(args)
     }

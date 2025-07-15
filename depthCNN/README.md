@@ -30,6 +30,9 @@ The dataset has been extracted with timestamp-based matching:
 # Use existing orbslam conda environment
 source ~/miniconda3/bin/activate
 conda activate orbslam
+
+# Navigate to depthCNN directory
+cd /home/external/ORB_SLAM3_VIO/depthCNN
 ```
 
 ### 2. Extract Data (if not already done)
@@ -39,6 +42,8 @@ python extract_dataset.py  # All defaults configured for full 30Hz extraction
 ```
 
 ### 3. Train Model
+
+#### Full Resolution (1408×1408)
 ```bash
 # Single GPU
 python train.py \
@@ -69,12 +74,78 @@ Note:
 - Multi-GPU: Can use batch-size 16 (4 per GPU) or higher
 - Learning rate scales with batch size (2x batch → ~1.4-2x lr)
 
-### 4. Evaluate
+#### Low Resolution Training (88×88 with 16x downscaling)
 ```bash
+# Efficient training with larger batch size
+python train_lowres.py \
+    --data-root ./processed_data \
+    --lowres-scale 16 \
+    --epochs 20 \
+    --batch-size 32 \
+    --lr 2e-4 \
+    --crop-size 1408
+
+# Other scale factors (2, 4, 8, 16)
+python train_lowres.py \
+    --data-root ./processed_data \
+    --lowres-scale 8 \
+    --epochs 20 \
+    --batch-size 16 \
+    --lr 2e-4
+```
+
+Benefits of low-resolution training:
+- **256x faster** computation (16x16 = 256x fewer pixels)
+- **8x larger batches** possible with same GPU memory
+- **Faster convergence** for gaze-specific depth prediction
+- **Ideal for real-time** applications where only gaze depth matters
+- **Gaze-aware evaluation**: Computes metrics specifically at gaze locations
+
+Note: The training scripts include a custom collate function to handle missing gaze data gracefully.
+
+### 4. Evaluate
+
+#### Full Resolution Evaluation
+```bash
+# Evaluate on test dataset (default)
 python evaluate.py \
     --checkpoint checkpoints/best_model.pth \
     --data-root ./processed_data
+
+# With batch size adjustment for larger GPUs
+python evaluate.py \
+    --checkpoint checkpoints/best_model.pth \
+    --data-root ./processed_data \
+    --batch-size 16
 ```
+
+#### Low Resolution Evaluation
+```bash
+# Evaluate low-res model on test dataset
+python evaluate_lowres.py \
+    --checkpoint ./checkpoints/lowres_16x/checkpoint_best.pth \
+    --data-root ./processed_data \
+    --lowres-scale 16 \
+    --save-results
+
+# Evaluate with larger batch size (faster)
+python evaluate_lowres.py \
+    --checkpoint ./checkpoints/lowres_16x/checkpoint_best.pth \
+    --data-root ./processed_data \
+    --lowres-scale 16 \
+    --batch-size 64 \
+    --save-results
+
+# Test downsampling pipeline
+python test_lowres_pipeline.py --data-root ./processed_data --visualize
+```
+
+The evaluation will report:
+- **Standard metrics**: abs_rel, sq_rel, RMSE, a1-a3 accuracy
+- **Gaze-specific metrics**: MAE, RMSE, and relative error at gaze location
+- **Latency statistics**: Mean, median, min/max, percentiles, and throughput (FPS)
+  - Low-res (88×88): Expected ~2-5ms per frame on GPU
+  - Full-res (1408×1408): Expected ~20-50ms per frame on GPU
 
 ### 5. Export to TensorRT (optional)
 ```bash
@@ -116,3 +187,33 @@ python export_tensorrt.py \
 - Best model saved based on lowest validation loss
 - Expect significant improvement over 2Hz subsampled training
 - Full resolution preserves spatial context for better predictions
+
+## Monitoring Training
+
+```bash
+# Watch GPU usage
+watch -n 1 nvidia-smi
+
+# Monitor training log in real-time
+tail -f logs/lowres_16x/training_*.log
+
+# Check training progress
+cat logs/lowres_16x/training_log.json | jq '.[].val_metrics.abs_rel'
+```
+
+## Common Commands
+
+```bash
+# Test the downsampling pipeline
+python test_lowres_pipeline.py --data-root ./processed_data --visualize
+
+# Visualize a single sample from the dataset
+python lowres_dataset.py --data-root ./processed_data --scale-factor 16 --visualize
+
+# Resume training from checkpoint
+python train_lowres.py \
+    --data-root ./processed_data \
+    --lowres-scale 16 \
+    --resume ./checkpoints/lowres_16x/checkpoint_latest.pth \
+    --lr 1e-5
+```

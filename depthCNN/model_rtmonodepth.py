@@ -102,6 +102,18 @@ class SILogLoss(nn.Module):
         Returns:
             Loss value
         """
+        # Ensure all tensors have the same shape
+        # pred_depth should be [B, 1, H, W] from the model
+        # target_depth and valid_mask are [B, 1, H, W] from the dataset
+        
+        # Squeeze all to [B, H, W] for masking
+        if pred_depth.dim() == 4 and pred_depth.size(1) == 1:
+            pred_depth = pred_depth.squeeze(1)
+        if target_depth.dim() == 4 and target_depth.size(1) == 1:
+            target_depth = target_depth.squeeze(1)
+        if valid_mask.dim() == 4 and valid_mask.size(1) == 1:
+            valid_mask = valid_mask.squeeze(1)
+        
         # Apply mask
         pred = pred_depth[valid_mask]
         target = target_depth[valid_mask]
@@ -209,6 +221,15 @@ class DepthMetrics:
         Returns:
             Dictionary of metrics
         """
+        # Ensure all tensors have the same shape
+        # Squeeze all to [B, H, W] for masking
+        if pred_depth.dim() == 4 and pred_depth.size(1) == 1:
+            pred_depth = pred_depth.squeeze(1)
+        if target_depth.dim() == 4 and target_depth.size(1) == 1:
+            target_depth = target_depth.squeeze(1)
+        if valid_mask.dim() == 4 and valid_mask.size(1) == 1:
+            valid_mask = valid_mask.squeeze(1)
+            
         # Apply mask and flatten
         pred = pred_depth[valid_mask].detach().cpu()
         target = target_depth[valid_mask].detach().cpu()
