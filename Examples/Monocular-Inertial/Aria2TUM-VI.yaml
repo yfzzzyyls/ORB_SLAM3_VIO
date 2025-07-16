@@ -1,33 +1,34 @@
 %YAML:1.0
 
 #--------------------------------------------------------------------------------------------
-# Camera Parameters for Aria Digital Twin (ADT) SLAM cameras (after 90° clockwise rotation)
-# Updated for ADT dataset: 30Hz camera, 1000Hz IMU (2025-01-08)
+# Camera Parameters for Aria Digital Twin (ADT) RIGHT SLAM camera (Original 640x480)
+# Updated for ADT dataset: 30Hz camera, 1000Hz RIGHT IMU (2025-01-08)
+# Using right camera + right IMU for same-side configuration
+# Keeps original sideways-mounted camera orientation (no rotation applied)
 #--------------------------------------------------------------------------------------------
 File.version: "1.0"
 
 # Camera model - KannalaBrandt8 for fisheye/wide-angle cameras
 Camera.type: "KannalaBrandt8"
 
-# Camera intrinsics after 90° clockwise rotation - CORRECTED VALUES
-# Original: 640x480 -> Rotated: 480x640
-# ADT true values: fx=241.092481, cx=316.638312, cy=237.024868 (640x480)
-# After rotation: fx stays same, (cx,cy) -> (480-cy, cx)
-Camera1.fx: 241.092481
-Camera1.fy: 241.092481
-Camera1.cx: 242.975132   # 480 - 237.024868
-Camera1.cy: 316.638312   # original cx
+# Camera intrinsics - RIGHT CAMERA VALUES
+# Resolution: 640x480 (original orientation)
+# ADT RIGHT camera values: fx=241.0794006560098, cx=317.8779842776632, cy=238.2045722980715
+Camera1.fx: 241.0794006560098
+Camera1.fy: 241.0794006560098
+Camera1.cx: 317.8779842776632   # original cx
+Camera1.cy: 238.2045722980715   # original cy
 
-# Kannala-Brandt distortion parameters
+# Kannala-Brandt distortion parameters (RIGHT camera)
 # Mapped from Aria's projection parameters
-Camera1.k1: -0.0256882    # Aria k2
-Camera1.k2: 0.102607      # Aria k3
-Camera1.k3: -0.0737081    # Aria k4
-Camera1.k4: 0.0133687     # Aria k5
+Camera1.k1: -0.02534979127436547    # Aria k2
+Camera1.k2: 0.09753838193062647     # Aria k3
+Camera1.k3: -0.06689939727565536    # Aria k4
+Camera1.k4: 0.009687761670493508    # Aria k5
 
-# Camera resolution (after rotation)
-Camera.width: 480
-Camera.height: 640
+# Camera resolution
+Camera.width: 640
+Camera.height: 480
 
 # Camera frame rate (ADT SLAM cameras run at 30Hz)
 Camera.fps: 30
@@ -35,18 +36,19 @@ Camera.fps: 30
 # Color order (0: BGR, 1: RGB. Ignored for grayscale)
 Camera.RGB: 1
 
-# Transformation from IMU (body frame) to left camera
+# Transformation from RIGHT IMU (body frame) to RIGHT camera
 # This matrix is calculated from Aria calibration data
+# Note: This transform is for right IMU to right camera (same side)
 IMU.T_b_c1: !!opencv-matrix
    rows: 4
    cols: 4
    dt: f
-   data: [-0.202544303602, 0.978379674653, 0.041821254208, 0.019051545640,
-          0.226582830936, 0.088369194992, -0.969974796632, -0.111436829102,
-          -0.952699336519, -0.186986891523, -0.239582713472, 0.079492102063,
-          0.0, 0.0, 0.0, 1.0]
+   data: [0.986402413, 0.057123357, -0.154101271, -0.001522004, 
+          0.057723419, -0.998332444, -0.000581313, -0.000235453, 
+          -0.153877505, -0.008321844, -0.988054887, -0.006221336, 
+          0.000000000, 0.000000000, 0.000000000, 1.000000000]
 
-# IMU noise parameters for Aria IMU (1202-1)
+# IMU noise parameters for Aria RIGHT IMU (1202-1) @ 1000Hz
 IMU.NoiseGyro: 1.6968e-4      # rad/s/√Hz (TUM-VI gyroscope noise density)
 IMU.NoiseAcc: 2.8000e-3       # m/s²/√Hz (TUM-VI accelerometer noise density)
 IMU.GyroWalk: 1.9393e-5       # rad/s²/√Hz (TUM-VI gyroscope random walk)
