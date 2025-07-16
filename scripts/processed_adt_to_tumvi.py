@@ -276,11 +276,11 @@ def convert_sequence_to_tumvi(seq_dir, output_dir, start_time=0, duration=None, 
             # Apply rectification if requested
             if rectify:
                 img_final = rectify_fisheye_image(img, slam_calib_data)
-                # Use timestamp as filename for rectified images
-                new_filename = f"{slam_timestamps_ns[orig_idx]}.png"
             else:
                 img_final = img
-                new_filename = f"{new_idx:06d}.png"
+            
+            # Always use timestamp as filename for ORB-SLAM3 compatibility
+            new_filename = f"{slam_timestamps_ns[orig_idx]}.png"
             
             # Save image
             new_path = mav0_path / "cam0" / "data" / new_filename
