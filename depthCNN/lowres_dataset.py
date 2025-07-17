@@ -88,6 +88,7 @@ class LowResADTDataset(ProcessedADTDataset):
         
         # Load and scale gaze information if available
         gaze_info = None
+        gt_depth_at_gaze = None
         if 'gaze' in frame_info and frame_info.get('has_gaze', False):
             try:
                 gaze_path = frame_info['seq_dir'] / 'gaze' / frame_info['gaze']
@@ -95,7 +96,18 @@ class LowResADTDataset(ProcessedADTDataset):
                     with open(gaze_path, 'r') as f:
                         gaze_data = json.load(f)
                     
-                    # Scale gaze coordinates
+                    # Extract exact GT depth at original gaze location BEFORE downsampling
+                    gaze_x_orig = int(round(gaze_data['x_pixel']))
+                    gaze_y_orig = int(round(gaze_data['y_pixel']))
+                    
+                    # Ensure coordinates are within bounds
+                    gaze_x_orig = max(0, min(gaze_x_orig, 1407))
+                    gaze_y_orig = max(0, min(gaze_y_orig, 1407))
+                    
+                    # Extract exact depth value at gaze position
+                    gt_depth_at_gaze = depth[gaze_y_orig, gaze_x_orig]
+                    
+                    # Scale gaze coordinates for 88x88
                     gaze_info = {
                         'x': gaze_data['x_pixel'] / self.scale_factor,
                         'y': gaze_data['y_pixel'] / self.scale_factor,
@@ -106,12 +118,13 @@ class LowResADTDataset(ProcessedADTDataset):
                         'time_diff_ms': gaze_data['time_diff_ms']
                     }
                     
-                    # Ensure gaze coordinates are within bounds
+                    # Ensure scaled coordinates are within bounds
                     gaze_info['x'] = max(0, min(gaze_info['x'], self.lowres_size - 1))
                     gaze_info['y'] = max(0, min(gaze_info['y'], self.lowres_size - 1))
             except Exception as e:
                 # If there's any error loading gaze, just skip it
                 gaze_info = None
+                gt_depth_at_gaze = None
         
         # Apply transforms if any (on low-res data)
         if self.transform:
@@ -126,6 +139,7 @@ class LowResADTDataset(ProcessedADTDataset):
             'sequence': frame_info['sequence'],
             'frame_idx': frame_info['index'],
             'gaze': gaze_info,
+            'gt_depth_at_gaze': gt_depth_at_gaze,  # Exact depth at gaze position
             'scale_factor': self.scale_factor,
             'original_size': 1408,
             'lowres_size': self.lowres_size

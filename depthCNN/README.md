@@ -217,3 +217,55 @@ python train_lowres.py \
     --resume ./checkpoints/lowres_16x/checkpoint_latest.pth \
     --lr 1e-5
 ```
+
+## Gaze-Only Depth Prediction (New Architecture)
+
+### Overview
+A specialized architecture for predicting depth only at the gaze location, based on the insight that we only need to understand what object is being gazed at, not reconstruct the entire spatial map.
+
+### Architecture Design
+1. **Encoder**: Keep the same RT-MonoDepth encoder for multi-scale feature extraction
+2. **Decoder**: Replace spatial decoder with an MLP that outputs a single depth value
+3. **Key Innovation**: Extract features at gaze location from multiple encoder scales
+
+### Implementation Details
+
+#### Multi-Scale Feature Extraction
+- Extract features at gaze location from encoder scales: [44×44, 22×22, 11×11, 5×5]
+- Use bilinear interpolation for sub-pixel accuracy
+- Project features to common dimension (64) before concatenation
+- Total feature vector: 256 dimensions (4 scales × 64)
+
+#### Two-Stage MLP Decoder
+1. **Object Understanding Stage** (256→128→64)
+   - Learns what object is at the gaze location
+   - Uses ReLU activations and layer normalization
+   
+2. **Depth Prediction Stage** (64→32→16→1)
+   - Predicts depth based on object understanding
+   - Final sigmoid activation for [0.1, 10.0]m range
+
+#### Training Configuration
+- **Data Augmentation**: Gaze-aware augmentation that adjusts gaze coordinates
+- **Loss Function**: Scale-invariant log loss with gaze-specific weighting
+- **Multi-Scale Supervision**: Auxiliary losses at intermediate scales
+- **Layer Normalization**: Applied after each linear layer for stability
+- **Initialization**: Xavier initialization with median depth bias
+
+#### Performance Optimizations
+- **Batch Processing**: Extract features for all gaze points in batch
+- **Mixed Precision**: FP16 training for efficiency
+- **Gradient Checkpointing**: For memory-efficient training
+- **Learning Rate Scaling**: Scale with batch size (linear or square root)
+
+### Advantages
+- **Efficiency**: ~0.5M parameters vs 1.23M for full model
+- **Speed**: Sub-millisecond inference for single gaze point
+- **Accuracy**: Optimized specifically for gaze location
+- **Simplicity**: No need for spatial reconstruction
+
+### Future Extensions
+- Integrate segmentation mask for object-aware features
+- Add temporal consistency for video sequences
+- Multi-task learning with object classification
+- Uncertainty estimation for depth predictions
