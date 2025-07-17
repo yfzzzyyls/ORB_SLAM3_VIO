@@ -225,7 +225,7 @@ def convert_aria_to_tumvi(vrs_path, output_dir, start_time=0, duration=None, rec
 
 def save_transforms(provider, save_path, rectify=False):
     """Calculate and save IMU-Camera transformation matrix for monocular setup"""
-    camera_label = "camera-slam-left"
+    camera_label = "camera-slam-right"  # Using RIGHT camera for consistency with RIGHT IMU
     
     # Get calibrations
     camera_calib = provider.get_device_calibration().get_camera_calib(camera_label)
