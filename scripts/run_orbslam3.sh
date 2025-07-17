@@ -125,13 +125,11 @@ ABS_IMU_FILE="$ABS_DATA_DIR/mav0/imu0/data.csv"
 
 cd ../results
 
-# Check if tracking data save is requested
-if [ ! -z "$SAVE_TRACKING" ] || [ ! -z "$ORB_SLAM3_SAVE_TRACKING" ]; then
-    export ORB_SLAM3_SAVE_TRACKING="tracking_data_${OUTPUT_NAME}"
-    mkdir -p "$ORB_SLAM3_SAVE_TRACKING"
-    echo "Tracking data will be saved to: results/$ORB_SLAM3_SAVE_TRACKING"
-    echo ""
-fi
+# Always save tracking data by default
+export ORB_SLAM3_SAVE_TRACKING="tracking_data_${OUTPUT_NAME}"
+mkdir -p "$ORB_SLAM3_SAVE_TRACKING"
+echo "Tracking data will be saved to: results/$ORB_SLAM3_SAVE_TRACKING"
+echo ""
 
 # Run ORB-SLAM3 with Pangolin viewer
 echo "Starting ORB-SLAM3..."

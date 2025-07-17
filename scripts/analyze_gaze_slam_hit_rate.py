@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 import sys
+import argparse
 
 sys.path.append('/home/external/.local/lib/python3.9/site-packages')
 from projectaria_tools.core import data_provider
@@ -94,14 +95,21 @@ def load_instance_categories(sequence_name, vrs_dir="/mnt/ssd_ext/incSeg-data/ad
     return id_to_category
 
 
-def analyze_hit_rate_sequence(sequence):
+def analyze_hit_rate_sequence(sequence, data_dir_suffix=""):
     """Analyze what percentage of frames have SLAM points on gazed object."""
     
     # Setup paths
     vrs_dir = Path(f"/mnt/ssd_ext/incSeg-data/adt/train/{sequence}")
     vrs_file = vrs_dir / f"ADT_{sequence}_main_recording.vrs"
     seg_vrs = vrs_dir / "segmentations.vrs"
-    tracking_dir = Path(f"/home/external/ORB_SLAM3_VIO/results/tracking_data_{sequence}_trajectory")
+    
+    # Construct tracking directory
+    # Default: tracking_data_{sequence}_trajectory (for default 2000 cap runs)
+    # With suffix: tracking_data_{sequence}_{suffix} (e.g., cap1000_trajectory)
+    if data_dir_suffix:
+        tracking_dir = Path(f"/home/external/ORB_SLAM3_VIO/results/tracking_data_{sequence}_{data_dir_suffix}")
+    else:
+        tracking_dir = Path(f"/home/external/ORB_SLAM3_VIO/results/tracking_data_{sequence}_trajectory")
     
     if not tracking_dir.exists():
         return None
@@ -275,6 +283,13 @@ def analyze_hit_rate_sequence(sequence):
 def main():
     """Analyze hit rate for all sequences."""
     
+    # Parse arguments
+    parser = argparse.ArgumentParser(description='Analyze SLAM hit rate on gazed objects')
+    parser.add_argument('--data-dir', type=str, default='', 
+                       help='Suffix for tracking data directory (e.g., "cap1000_trajectory" for cap 1000). ' +
+                            'If not specified, uses default tracking_data_*_trajectory directories.')
+    args = parser.parse_args()
+    
     sequences = [
         "Apartment_release_clean_seq131_M1292",
         "Apartment_release_clean_seq133_M1292",
@@ -290,6 +305,8 @@ def main():
     print("SLAM HIT RATE ANALYSIS")
     print("How often does the gazed object have at least 1 SLAM point?")
     print("Sampling: Frames 500-3000, every 25 frames")
+    if args.data_dir:
+        print(f"Using tracking data suffix: {args.data_dir}")
     print("="*70)
     
     all_results = []
@@ -299,7 +316,7 @@ def main():
     
     for seq in sequences:
         print(f"\nAnalyzing {seq.split('_')[-2]}...")
-        result = analyze_hit_rate_sequence(seq)
+        result = analyze_hit_rate_sequence(seq, args.data_dir)
         
         if result:
             all_results.append(result)
