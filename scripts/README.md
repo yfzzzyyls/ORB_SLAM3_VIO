@@ -84,6 +84,20 @@ python analyze_slam_depth_standard_metrics.py --data-dir cap1000_trajectory
 python analyze_slam_depth_standard_metrics.py --data-dir cap500_trajectory
 ```
 
+### `analyze_slam_pose_accuracy.py`
+Compares SLAM camera poses with ground truth trajectories from ADT.
+```bash
+# Analyze default trajectory files (2000 features)
+python analyze_slam_pose_accuracy.py
+
+# Analyze specific feature cap
+python analyze_slam_pose_accuracy.py --data-dir cap1000_trajectory
+python analyze_slam_pose_accuracy.py --data-dir cap500_trajectory
+```
+Metrics include:
+- **ATE** (Absolute Trajectory Error): Global trajectory consistency
+- **RPE** (Relative Pose Error): Frame-to-frame drift in translation and rotation
+
 ### `visualize_overlapping.py`
 Visualizes gaze points, SLAM features, and segmentation masks overlaid on images.
 ```bash
