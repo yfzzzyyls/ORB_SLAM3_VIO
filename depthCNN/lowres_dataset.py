@@ -62,6 +62,9 @@ class LowResADTDataset(ProcessedADTDataset):
         # Convert depth from millimeters to meters
         depth = depth.astype(np.float32) / 1000.0
         
+        # Keep a reference to numpy depth for gaze extraction
+        depth_numpy = depth.copy()
+        
         # Convert to tensors
         rgb = torch.from_numpy(rgb).permute(2, 0, 1).float() / 255.0
         depth = torch.from_numpy(depth).unsqueeze(0).float()
@@ -104,8 +107,8 @@ class LowResADTDataset(ProcessedADTDataset):
                     gaze_x_orig = max(0, min(gaze_x_orig, 1407))
                     gaze_y_orig = max(0, min(gaze_y_orig, 1407))
                     
-                    # Extract exact depth value at gaze position
-                    gt_depth_at_gaze = depth[gaze_y_orig, gaze_x_orig]
+                    # Extract exact depth value at gaze position from numpy array
+                    gt_depth_at_gaze = depth_numpy[gaze_y_orig, gaze_x_orig]
                     
                     # Scale gaze coordinates for 88x88
                     gaze_info = {
