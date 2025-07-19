@@ -1,464 +1,469 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-Evaluation script for Gaze-Only RT-MonoDepth model.
+Evaluation script for Lightweight Gaze-Only Depth Prediction model.
 Evaluates accuracy and latency specifically at gaze locations.
+Supports both the original GazeOnlyRTMonoDepth and the lightweight architecture.
 """
 
-import os
 import sys
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.utils.data import DataLoader
 import numpy as np
 from pathlib import Path
 import argparse
 import json
 import time
 from tqdm import tqdm
-from typing import Dict, List, Tuple
+from typing import Dict
 import matplotlib.pyplot as plt
-import cv2
+import matplotlib.patches as patches
+from datetime import datetime
 
 # Add project to path
 sys.path.append(str(Path(__file__).parent))
 
 from lowres_dataset import LowResADTDataset
+from lightweight_gaze_encoder import LightweightGazeOnlyDepth
 from gaze_only_rtmonodepth import GazeOnlyRTMonoDepth
-from train_gaze_only import extract_gt_depth_at_gaze
+from torch.utils.data import DataLoader
 
 
-def compute_gaze_specific_metrics(pred_depths: List[float], gt_depths: List[float], 
-                                 gaze_positions: List[Tuple[float, float]]) -> Dict:
+def parse_args():
+    parser = argparse.ArgumentParser(description='Evaluate Lightweight Gaze-Only Depth Model')
+    
+    # Model arguments
+    parser.add_argument('--checkpoint', type=str, required=True,
+                        help='Path to model checkpoint')
+    parser.add_argument('--model', type=str, default='lightweight',
+                        choices=['lightweight', 'original'],
+                        help='Model architecture to use')
+    
+    # Lightweight model specific args
+    parser.add_argument('--encoder-levels', type=int, default=3,
+                        help='Number of encoder levels (for lightweight model)')
+    parser.add_argument('--base-channels', type=int, default=32,
+                        help='Base channels (for lightweight model)')
+    
+    # Dataset arguments
+    parser.add_argument('--data-root', type=str, default='./processed_data',
+                        help='Path to processed ADT dataset')
+    parser.add_argument('--split', type=str, default='test',
+                        choices=['train', 'val', 'test'],
+                        help='Dataset split to evaluate on')
+    parser.add_argument('--lowres-scale', type=int, default=16,
+                        help='Downscale factor (should match training)')
+    
+    # Evaluation arguments
+    parser.add_argument('--batch-size', type=int, default=64,
+                        help='Batch size for evaluation')
+    parser.add_argument('--num-workers', type=int, default=4,
+                        help='Number of data loading workers')
+    parser.add_argument('--save-results', action='store_true',
+                        help='Save detailed results and visualizations')
+    parser.add_argument('--output-dir', type=str, default='./evaluation_results',
+                        help='Directory to save results')
+    parser.add_argument('--visualize', action='store_true',
+                        help='Create sample visualizations')
+    parser.add_argument('--num-vis-samples', type=int, default=10,
+                        help='Number of visualization samples')
+    
+    return parser.parse_args()
+
+
+def compute_metrics(pred_depths: np.ndarray, gt_depths: np.ndarray) -> Dict[str, float]:
     """
-    Compute metrics specific to gaze-based depth prediction.
+    Compute comprehensive metrics for gaze-based depth prediction.
     
     Args:
-        pred_depths: List of predicted depths at gaze
-        gt_depths: List of ground truth depths at gaze
-        gaze_positions: List of (x, y) gaze positions
+        pred_depths: Predicted depths at gaze locations [N]
+        gt_depths: Ground truth depths at gaze locations [N]
         
     Returns:
         Dictionary of metrics
     """
-    pred_depths = np.array(pred_depths)
-    gt_depths = np.array(gt_depths)
+    # Remove any invalid predictions
+    valid_mask = (gt_depths > 0.1) & (gt_depths < 10.0) & np.isfinite(pred_depths)
+    pred_depths = pred_depths[valid_mask]
+    gt_depths = gt_depths[valid_mask]
+    
+    if len(pred_depths) == 0:
+        return {
+            'mae': float('inf'),
+            'rmse': float('inf'),
+            'abs_rel': float('inf'),
+            'sq_rel': float('inf'),
+            'log_mae': float('inf'),
+            'delta_1': 0.0,
+            'delta_2': 0.0,
+            'delta_3': 0.0,
+        }
     
     # Basic metrics
     errors = np.abs(pred_depths - gt_depths)
-    metrics = {
-        'mae': np.mean(errors),
-        'rmse': np.sqrt(np.mean((pred_depths - gt_depths) ** 2)),
-        'median_ae': np.median(errors),
-        'std_ae': np.std(errors),
-    }
+    squared_errors = (pred_depths - gt_depths) ** 2
     
     # Relative errors
-    rel_errors = errors / (gt_depths + 1e-8)
-    metrics['abs_rel'] = np.mean(rel_errors)
-    metrics['median_rel'] = np.median(rel_errors)
+    rel_errors = errors / (gt_depths + 1e-6)
+    sq_rel_errors = squared_errors / (gt_depths ** 2 + 1e-6)
     
-    # Threshold accuracy
+    # Log errors
+    log_errors = np.abs(np.log(pred_depths + 1e-6) - np.log(gt_depths + 1e-6))
+    
+    # Threshold accuracies
     ratio = np.maximum(pred_depths / gt_depths, gt_depths / pred_depths)
-    metrics['delta_1.25'] = np.mean(ratio < 1.25)
-    metrics['delta_1.25^2'] = np.mean(ratio < 1.25 ** 2)
-    metrics['delta_1.25^3'] = np.mean(ratio < 1.25 ** 3)
+    delta_1 = np.mean(ratio < 1.25) * 100
+    delta_2 = np.mean(ratio < 1.25 ** 2) * 100
+    delta_3 = np.mean(ratio < 1.25 ** 3) * 100
     
-    # Depth range analysis
-    metrics['min_depth'] = np.min(gt_depths)
-    metrics['max_depth'] = np.max(gt_depths)
-    metrics['mean_depth'] = np.mean(gt_depths)
-    metrics['median_depth'] = np.median(gt_depths)
-    
-    # Error by depth range
-    near_mask = gt_depths < 2.0
-    mid_mask = (gt_depths >= 2.0) & (gt_depths < 5.0)
-    far_mask = gt_depths >= 5.0
-    
-    if np.any(near_mask):
-        metrics['mae_near'] = np.mean(errors[near_mask])
-        metrics['count_near'] = np.sum(near_mask)
-    if np.any(mid_mask):
-        metrics['mae_mid'] = np.mean(errors[mid_mask])
-        metrics['count_mid'] = np.sum(mid_mask)
-    if np.any(far_mask):
-        metrics['mae_far'] = np.mean(errors[far_mask])
-        metrics['count_far'] = np.sum(far_mask)
-    
-    # Error by image region (center vs peripheral)
-    gaze_x = np.array([p[0] for p in gaze_positions])
-    gaze_y = np.array([p[1] for p in gaze_positions])
-    center_x, center_y = 44, 44  # Center of 88x88 image
-    
-    center_mask = ((gaze_x - center_x) ** 2 + (gaze_y - center_y) ** 2) < (22 ** 2)
-    peripheral_mask = ~center_mask
-    
-    if np.any(center_mask):
-        metrics['mae_center'] = np.mean(errors[center_mask])
-        metrics['count_center'] = np.sum(center_mask)
-    if np.any(peripheral_mask):
-        metrics['mae_peripheral'] = np.mean(errors[peripheral_mask])
-        metrics['count_peripheral'] = np.sum(peripheral_mask)
+    metrics = {
+        'mae': np.mean(errors),
+        'rmse': np.sqrt(np.mean(squared_errors)),
+        'abs_rel': np.mean(rel_errors),
+        'sq_rel': np.mean(sq_rel_errors),
+        'log_mae': np.mean(log_errors),
+        'delta_1': delta_1,
+        'delta_2': delta_2,
+        'delta_3': delta_3,
+        'median_error': np.median(errors),
+        'std_error': np.std(errors),
+        'min_error': np.min(errors),
+        'max_error': np.max(errors),
+    }
     
     return metrics
 
 
-def measure_latency(model, device, input_size=(88, 88), num_warmup=50, num_iterations=200):
-    """
-    Measure inference latency of the model.
+def create_model(args):
+    """Create model based on architecture type."""
+    if args.model == 'lightweight':
+        model = LightweightGazeOnlyDepth(
+            num_encoder_levels=args.encoder_levels,
+            base_channels=args.base_channels,
+            use_multi_scale_supervision=True  # Must match training
+        )
+    else:  # original
+        model = GazeOnlyRTMonoDepth()
     
-    Returns:
-        Dictionary with latency statistics in milliseconds
-    """
+    return model
+
+
+def custom_collate_fn(batch):
+    """Custom collate function to handle None gaze values."""
+    # Filter out samples with invalid gaze
+    valid_samples = []
+    for sample in batch:
+        if (sample['gaze'] is not None and 
+            sample['gaze']['x'] >= 0 and 
+            sample['gt_depth_at_gaze'] is not None and
+            sample['gt_depth_at_gaze'] > 0.1):
+            valid_samples.append(sample)
+    
+    if len(valid_samples) == 0:
+        return None
+    
+    # Standard collation for valid samples
+    return torch.utils.data.default_collate(valid_samples)
+
+
+def measure_latency(model, device, data_loader, num_runs=100):
+    """Measure model inference latency using real data."""
     model.eval()
     
-    # Create dummy inputs
-    batch_size = 1
-    rgb = torch.randn(batch_size, 3, *input_size).to(device)
-    gaze_x = torch.tensor([input_size[0] // 2], dtype=torch.float32).to(device)
-    gaze_y = torch.tensor([input_size[1] // 2], dtype=torch.float32).to(device)
+    # Get a real sample from the data loader
+    real_batch = None
+    for batch in data_loader:
+        if batch is not None:
+            real_batch = batch
+            break
+    
+    if real_batch is None:
+        print("Warning: Could not get real data for latency measurement")
+        return 0.0
+    
+    # Use first sample from batch
+    real_input = real_batch['rgb'][:1].to(device)
+    real_gaze_x = real_batch['gaze']['x'][:1].float().to(device)
+    real_gaze_y = real_batch['gaze']['y'][:1].float().to(device)
     
     # Warmup
-    for _ in range(num_warmup):
+    for _ in range(10):
         with torch.no_grad():
-            _ = model(rgb, gaze_x, gaze_y)
+            _ = model(real_input, real_gaze_x, real_gaze_y)
     
     # Measure
-    torch.cuda.synchronize() if device.type == 'cuda' else None
+    torch.cuda.synchronize() if torch.cuda.is_available() else None
+    start_time = time.time()
     
-    latencies = []
-    for _ in range(num_iterations):
-        start = time.perf_counter()
-        
+    for _ in range(num_runs):
         with torch.no_grad():
-            _ = model(rgb, gaze_x, gaze_y)
-        
-        torch.cuda.synchronize() if device.type == 'cuda' else None
-        end = time.perf_counter()
-        
-        latencies.append((end - start) * 1000)  # Convert to ms
+            _ = model(real_input, real_gaze_x, real_gaze_y)
     
-    latencies = np.array(latencies)
+    torch.cuda.synchronize() if torch.cuda.is_available() else None
+    end_time = time.time()
     
-    return {
-        'mean_ms': np.mean(latencies),
-        'median_ms': np.median(latencies),
-        'std_ms': np.std(latencies),
-        'min_ms': np.min(latencies),
-        'max_ms': np.max(latencies),
-        'p95_ms': np.percentile(latencies, 95),
-        'p99_ms': np.percentile(latencies, 99),
-        'fps': 1000 / np.mean(latencies)
-    }
+    avg_latency = (end_time - start_time) / num_runs * 1000  # ms
+    return avg_latency
 
 
-def visualize_predictions(model, dataset, device, save_dir, num_samples=10):
-    """Create visualizations of predictions vs ground truth."""
-    save_dir = Path(save_dir)
-    save_dir.mkdir(parents=True, exist_ok=True)
-    
+def visualize_predictions(model, data_loader, device, num_samples=10):
+    """Create visualization of predictions vs ground truth."""
     model.eval()
     
-    # Sample random indices
-    indices = np.random.choice(len(dataset), min(num_samples, len(dataset)), replace=False)
-    
-    for idx_num, idx in enumerate(indices):
-        sample = dataset[idx]
-        
-        if sample['gaze'] is None or sample['gaze']['x'] < 0:
-            continue
-        
-        # Prepare inputs
-        rgb = sample['rgb'].unsqueeze(0).to(device)
-        gaze_x = torch.tensor([sample['gaze']['x']], dtype=torch.float32).to(device)
-        gaze_y = torch.tensor([sample['gaze']['y']], dtype=torch.float32).to(device)
-        
-        # Get prediction
-        with torch.no_grad():
-            outputs = model(rgb, gaze_x, gaze_y)
-            pred_depth = outputs['depth'].item()
-        
-        # Get ground truth
-        if sample.get('gt_depth_at_gaze') is not None:
-            gt_depth = sample['gt_depth_at_gaze']
-        else:
-            # Fallback to interpolation if exact GT not available
-            gt_depth_map = sample['depth'].unsqueeze(0).to(device)
-            gt_depth = extract_gt_depth_at_gaze(gt_depth_map, gaze_x, gaze_y).item()
-        
-        # Create visualization
-        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-        
-        # RGB image with gaze point
-        rgb_np = sample['rgb'].permute(1, 2, 0).numpy()
-        axes[0].imshow(rgb_np)
-        axes[0].scatter(sample['gaze']['x'], sample['gaze']['y'], 
-                       c='red', s=100, marker='x', linewidths=3)
-        axes[0].set_title(f'RGB with Gaze Point')
-        axes[0].axis('off')
-        
-        # Ground truth depth map
-        depth_np = sample['depth'].squeeze().numpy()
-        im1 = axes[1].imshow(depth_np, cmap='viridis')
-        axes[1].scatter(sample['gaze']['x'], sample['gaze']['y'], 
-                       c='red', s=100, marker='x', linewidths=3)
-        axes[1].set_title(f'GT Depth (at gaze: {gt_depth:.2f}m)')
-        axes[1].axis('off')
-        plt.colorbar(im1, ax=axes[1], fraction=0.046)
-        
-        # Error visualization
-        error = abs(pred_depth - gt_depth)
-        rel_error = error / gt_depth * 100
-        
-        # Create a simple bar chart showing predicted vs GT
-        bars = axes[2].bar(['Ground Truth', 'Predicted'], [gt_depth, pred_depth], 
-                          color=['green', 'blue'])
-        axes[2].set_ylabel('Depth (m)')
-        axes[2].set_title(f'Error: {error:.3f}m ({rel_error:.1f}%)')
-        axes[2].set_ylim(0, max(gt_depth, pred_depth) * 1.2)
-        
-        # Add value labels on bars
-        for bar, value in zip(bars, [gt_depth, pred_depth]):
-            height = bar.get_height()
-            axes[2].text(bar.get_x() + bar.get_width()/2., height + 0.05,
-                        f'{value:.2f}m', ha='center', va='bottom')
-        
-        plt.tight_layout()
-        save_path = save_dir / f'sample_{idx_num:03d}.png'
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        plt.close()
-        
-        print(f"Saved visualization to {save_path}")
-
-
-def evaluate_dataset(model, dataloader, device, save_results=False, output_dir=None):
-    """Evaluate model on entire dataset."""
-    model.eval()
-    
-    all_pred_depths = []
-    all_gt_depths = []
-    all_gaze_positions = []
-    all_sequences = []
-    
-    print("Evaluating on dataset...")
+    samples_collected = 0
+    fig, axes = plt.subplots(num_samples, 3, figsize=(12, 4 * num_samples))
+    if num_samples == 1:
+        axes = axes.reshape(1, -1)
     
     with torch.no_grad():
-        for batch in tqdm(dataloader, desc='Evaluating'):
+        for batch_idx, batch in enumerate(data_loader):
             if batch is None:
                 continue
             
-            # Get data
-            rgb = batch['rgb'].to(device)
-            gaze_x = batch['gaze_x'].to(device)
-            gaze_y = batch['gaze_y'].to(device)
+            images = batch['rgb'].to(device)
+            gaze_x = batch['gaze']['x'].float().to(device)
+            gaze_y = batch['gaze']['y'].float().to(device)
+            gt_depths = batch['gt_depth_at_gaze'].to(device)
             
-            # Get GT depth (either exact or interpolated)
-            if 'gt_depth_at_gaze' in batch:
-                gt_depth = batch['gt_depth_at_gaze'].to(device)
-            else:
-                # Fallback to interpolation
-                depth_full = batch['depth'].to(device)
-                gt_depth = extract_gt_depth_at_gaze(depth_full, gaze_x, gaze_y)
+            outputs = model(images, gaze_x, gaze_y)
+            pred_depths = outputs['depth'].squeeze()
             
-            # Get predictions
-            outputs = model(rgb, gaze_x, gaze_y)
-            pred_depth = outputs['depth']
+            # Convert to numpy
+            images_np = images.cpu().numpy()
+            gt_depths_np = gt_depths.cpu().numpy()
+            pred_depths_np = pred_depths.cpu().numpy()
+            gaze_x_np = gaze_x.cpu().numpy()
+            gaze_y_np = gaze_y.cpu().numpy()
             
-            # Store results
-            for i in range(pred_depth.shape[0]):
-                all_pred_depths.append(pred_depth[i].item())
-                all_gt_depths.append(gt_depth[i].item())
-                all_gaze_positions.append((gaze_x[i].item(), gaze_y[i].item()))
+            batch_size = images.shape[0]
+            for i in range(batch_size):
+                if samples_collected >= num_samples:
+                    break
+                
+                # Get individual sample
+                img = images_np[i].transpose(1, 2, 0)
+                gaze_x_val = float(gaze_x_np[i])
+                gaze_y_val = float(gaze_y_np[i])
+                gt_depth = float(gt_depths_np[i])
+                pred_depth = float(pred_depths_np[i])
+                
+                row_idx = samples_collected
+                
+                # Plot image with gaze point
+                axes[row_idx, 0].imshow(img)
+                circle = patches.Circle((gaze_x_val, gaze_y_val), 3, 
+                                      edgecolor='red', facecolor='none', linewidth=2)
+                axes[row_idx, 0].add_patch(circle)
+                axes[row_idx, 0].set_title(f'Input Image (Gaze at {gaze_x_val:.1f}, {gaze_y_val:.1f})')
+                axes[row_idx, 0].axis('off')
+                
+                # Plot depth comparison
+                depth_comparison = np.array([[gt_depth, pred_depth]])
+                im = axes[row_idx, 1].imshow(depth_comparison, cmap='viridis', aspect='auto')
+                axes[row_idx, 1].set_xticks([0, 1])
+                axes[row_idx, 1].set_xticklabels(['GT', 'Pred'])
+                axes[row_idx, 1].set_yticks([])
+                axes[row_idx, 1].set_title(f'GT: {gt_depth:.2f}m, Pred: {pred_depth:.2f}m')
+                plt.colorbar(im, ax=axes[row_idx, 1])
+                
+                # Plot error
+                error = abs(pred_depth - gt_depth)
+                axes[row_idx, 2].bar(['Error'], [error], color='red' if error > 0.5 else 'green')
+                axes[row_idx, 2].set_ylim([0, max(1.0, error * 1.2)])
+                axes[row_idx, 2].set_title(f'Error: {error:.3f}m ({error/gt_depth*100:.1f}%)')
+                
+                samples_collected += 1
+            
+            if samples_collected >= num_samples:
+                break
     
-    # Compute metrics
-    metrics = compute_gaze_specific_metrics(all_pred_depths, all_gt_depths, all_gaze_positions)
-    
-    # Save detailed results if requested
-    if save_results and output_dir:
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Save predictions
-        results = {
-            'predictions': all_pred_depths,
-            'ground_truth': all_gt_depths,
-            'gaze_positions': all_gaze_positions,
-            'metrics': metrics
-        }
-        
-        with open(output_dir / 'evaluation_results.json', 'w') as f:
-            json.dump(results, f, indent=2)
-        
-        # Create error histogram
-        errors = np.array(all_pred_depths) - np.array(all_gt_depths)
-        plt.figure(figsize=(10, 6))
-        plt.hist(errors, bins=50, alpha=0.7, edgecolor='black')
-        plt.axvline(0, color='red', linestyle='--', label='Zero error')
-        plt.xlabel('Depth Error (m)')
-        plt.ylabel('Count')
-        plt.title('Distribution of Depth Prediction Errors at Gaze')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        plt.savefig(output_dir / 'error_histogram.png', dpi=150, bbox_inches='tight')
-        plt.close()
-        
-        # Create scatter plot
-        plt.figure(figsize=(10, 10))
-        plt.scatter(all_gt_depths, all_pred_depths, alpha=0.5, s=1)
-        plt.plot([0, 10], [0, 10], 'r--', label='Perfect prediction')
-        plt.xlabel('Ground Truth Depth (m)')
-        plt.ylabel('Predicted Depth (m)')
-        plt.title('Predicted vs Ground Truth Depth at Gaze')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        plt.axis('equal')
-        plt.xlim(0, 10)
-        plt.ylim(0, 10)
-        plt.savefig(output_dir / 'scatter_plot.png', dpi=150, bbox_inches='tight')
-        plt.close()
-    
-    return metrics
+    plt.tight_layout()
+    return fig
 
 
-def main():
-    parser = argparse.ArgumentParser(description='Evaluate Gaze-Only RT-MonoDepth')
-    parser.add_argument('--checkpoint', type=str, required=True,
-                        help='Path to model checkpoint')
-    parser.add_argument('--data-root', type=str, default='./processed_data',
-                        help='Path to processed ADT dataset')
-    parser.add_argument('--split', type=str, default='test',
-                        help='Dataset split to evaluate on (train/val/test)')
-    parser.add_argument('--batch-size', type=int, default=64,
-                        help='Batch size for evaluation')
-    parser.add_argument('--lowres-scale', type=int, default=16,
-                        help='Downscale factor (should match training)')
-    parser.add_argument('--save-results', action='store_true',
-                        help='Save detailed results and visualizations')
-    parser.add_argument('--output-dir', type=str, default='./evaluation_results/gaze_only',
-                        help='Directory to save results')
-    parser.add_argument('--num-workers', type=int, default=4,
-                        help='Number of data loading workers')
-    parser.add_argument('--visualize', action='store_true',
-                        help='Create sample visualizations')
-    parser.add_argument('--num-vis-samples', type=int, default=20,
-                        help='Number of visualization samples')
-    
-    args = parser.parse_args()
-    
-    # Device
+def evaluate(args):
+    """Main evaluation function."""
+    # Setup device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
-    # Load model
-    print(f"Loading model from {args.checkpoint}...")
-    model = GazeOnlyRTMonoDepth()
-    checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
-    
-    # Handle DataParallel
-    if 'module.' in list(checkpoint['model_state_dict'].keys())[0]:
-        # Remove 'module.' prefix
-        state_dict = {k.replace('module.', ''): v for k, v in checkpoint['model_state_dict'].items()}
-        model.load_state_dict(state_dict)
-    else:
-        model.load_state_dict(checkpoint['model_state_dict'])
-    
-    model = model.to(device)
-    model.eval()
-    
-    print(f"Model parameters: {model.get_num_params():,}")
-    
-    # Measure latency
-    print("\nMeasuring inference latency...")
-    latency_stats = measure_latency(model, device, input_size=(88, 88))
-    print("Latency Statistics:")
-    for key, value in latency_stats.items():
-        print(f"  {key}: {value:.3f}")
+    # Create output directory
+    if args.save_results:
+        output_dir = Path(args.output_dir) / f"{args.model}_eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        print(f"Results will be saved to: {output_dir}")
     
     # Create dataset
     print(f"\nLoading {args.split} dataset...")
     dataset = LowResADTDataset(
         data_root=args.data_root,
         split=args.split,
-        scale_factor=args.lowres_scale,
-        transform=None
+        scale_factor=args.lowres_scale
     )
-    
     print(f"Dataset size: {len(dataset)} samples")
     
-    # Create dataloader with custom collate function
-    from train_gaze_only import custom_collate_fn
-    
-    dataloader = DataLoader(
+    # Create dataloader
+    data_loader = DataLoader(
         dataset,
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
         pin_memory=True,
-        collate_fn=lambda batch: custom_collate_fn(batch)  # Use collate without augmentation
+        collate_fn=custom_collate_fn
     )
     
-    # Evaluate on dataset
-    metrics = evaluate_dataset(model, dataloader, device, 
-                             save_results=args.save_results,
-                             output_dir=args.output_dir)
+    # Create model
+    print(f"\nCreating {args.model} model...")
+    model = create_model(args)
+    model = model.to(device)
+    
+    # Load checkpoint
+    print(f"Loading checkpoint: {args.checkpoint}")
+    checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
+    
+    # Display training metrics if available
+    print(f"\nTraining Information:")
+    print(f"  Trained for epochs: {checkpoint.get('epoch', 'N/A')}")
+    if 'metrics' in checkpoint and isinstance(checkpoint['metrics'], dict):
+        print(f"  Best validation metrics during training:")
+        for k, v in checkpoint['metrics'].items():
+            if isinstance(v, (int, float)):
+                if k in ['mae', 'rmse', 'abs_rel', 'sq_rel', 'rmse_log']:
+                    print(f"    {k}: {v:.4f}")
+                elif k in ['a1', 'a2', 'a3']:
+                    # Note: stored metrics are in decimal form (0.8167 = 81.67%)
+                    print(f"    δ < 1.25^{k[-1]}: {v*100:.1f}%")
+    
+    # Handle DataParallel state dict
+    state_dict = checkpoint['model_state_dict']
+    if 'module.' in list(state_dict.keys())[0]:
+        state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
+    
+    model.load_state_dict(state_dict)
+    model.eval()
+    
+    # Get model info
+    num_params = sum(p.numel() for p in model.parameters())
+    print(f"Model parameters: {num_params:,} ({num_params/1e6:.2f}M)")
+    
+    # Measure latency
+    print("\nMeasuring inference latency...")
+    avg_latency = measure_latency(model, device, data_loader)
+    print(f"Average latency: {avg_latency:.2f}ms ({1000/avg_latency:.1f} FPS)")
+    
+    # Evaluate
+    print("\nEvaluating model...")
+    all_pred_depths = []
+    all_gt_depths = []
+    all_gaze_positions = []
+    
+    with torch.no_grad():
+        for batch in tqdm(data_loader, desc="Evaluating"):
+            if batch is None:
+                continue
+            
+            images = batch['rgb'].to(device)
+            gaze_x = batch['gaze']['x'].float().to(device)
+            gaze_y = batch['gaze']['y'].float().to(device)
+            gt_depths = batch['gt_depth_at_gaze'].to(device)
+            
+            # Forward pass
+            outputs = model(images, gaze_x, gaze_y)
+            pred_depths = outputs['depth'].squeeze()
+            
+            # Collect results
+            all_pred_depths.extend(pred_depths.cpu().numpy().tolist())
+            all_gt_depths.extend(gt_depths.cpu().numpy().tolist())
+            
+            # Collect gaze positions
+            for i in range(len(gaze_x)):
+                all_gaze_positions.append((
+                    float(gaze_x[i]),
+                    float(gaze_y[i])
+                ))
+    
+    # Convert to numpy arrays
+    all_pred_depths = np.array(all_pred_depths)
+    all_gt_depths = np.array(all_gt_depths)
+    
+    # Compute metrics
+    print("\nComputing metrics...")
+    metrics = compute_metrics(all_pred_depths, all_gt_depths)
     
     # Print results
     print("\n" + "="*50)
-    print("EVALUATION RESULTS")
+    print(f"Evaluation Results - {args.model} Model")
+    print("="*50)
+    print(f"Checkpoint: {Path(args.checkpoint).name}")
+    print(f"Dataset: {args.split} split ({len(all_pred_depths)} samples)")
+    print(f"Model Parameters: {num_params:,} ({num_params/1e6:.2f}M)")
+    print(f"Inference Latency: {avg_latency:.2f}ms ({1000/avg_latency:.1f} FPS)")
+    print("\nDepth Prediction Metrics:")
+    print(f"  MAE:          {metrics['mae']:.4f}m")
+    print(f"  RMSE:         {metrics['rmse']:.4f}m")
+    print(f"  Abs Rel:      {metrics['abs_rel']:.4f}")
+    print(f"  Sq Rel:       {metrics['sq_rel']:.4f}")
+    print(f"  Log MAE:      {metrics['log_mae']:.4f}")
+    print(f"  delta < 1.25:     {metrics['delta_1']:.1f}%")
+    print(f"  delta < 1.25^2:   {metrics['delta_2']:.1f}%")
+    print(f"  delta < 1.25^3:   {metrics['delta_3']:.1f}%")
+    print(f"\nError Statistics:")
+    print(f"  Median Error: {metrics['median_error']:.4f}m")
+    print(f"  Std Error:    {metrics['std_error']:.4f}m")
+    print(f"  Min Error:    {metrics['min_error']:.4f}m")
+    print(f"  Max Error:    {metrics['max_error']:.4f}m")
     print("="*50)
     
-    print("\nCore Metrics:")
-    print(f"  MAE: {metrics['mae']:.4f} m")
-    print(f"  RMSE: {metrics['rmse']:.4f} m")
-    print(f"  Abs Rel: {metrics['abs_rel']:.4f}")
-    print(f"  δ < 1.25: {metrics['delta_1.25']:.3f}")
-    print(f"  δ < 1.25²: {metrics['delta_1.25^2']:.3f}")
-    print(f"  δ < 1.25³: {metrics['delta_1.25^3']:.3f}")
-    
-    print("\nDepth Range Analysis:")
-    if 'mae_near' in metrics:
-        print(f"  Near (<2m): {metrics['mae_near']:.4f} m (n={metrics['count_near']})")
-    if 'mae_mid' in metrics:
-        print(f"  Mid (2-5m): {metrics['mae_mid']:.4f} m (n={metrics['count_mid']})")
-    if 'mae_far' in metrics:
-        print(f"  Far (>5m): {metrics['mae_far']:.4f} m (n={metrics['count_far']})")
-    
-    print("\nSpatial Analysis:")
-    if 'mae_center' in metrics:
-        print(f"  Center: {metrics['mae_center']:.4f} m (n={metrics['count_center']})")
-    if 'mae_peripheral' in metrics:
-        print(f"  Peripheral: {metrics['mae_peripheral']:.4f} m (n={metrics['count_peripheral']})")
-    
-    print("\nLatency:")
-    print(f"  Mean: {latency_stats['mean_ms']:.2f} ms")
-    print(f"  FPS: {latency_stats['fps']:.1f}")
-    
-    # Create visualizations
-    if args.visualize:
-        print(f"\nCreating {args.num_vis_samples} sample visualizations...")
-        vis_dir = Path(args.output_dir) / 'visualizations' if args.output_dir else Path('./visualizations')
-        visualize_predictions(model, dataset, device, vis_dir, num_samples=args.num_vis_samples)
-    
-    # Save all results
+    # Save results
     if args.save_results:
-        output_dir = Path(args.output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Save complete results
-        complete_results = {
-            'metrics': metrics,
-            'latency': latency_stats,
-            'checkpoint': args.checkpoint,
+        # Save metrics
+        results = {
+            'model': args.model,
+            'checkpoint': str(args.checkpoint),
             'dataset_split': args.split,
-            'lowres_scale': args.lowres_scale,
-            'model_params': model.get_num_params()
+            'num_samples': len(all_pred_depths),
+            'num_params': num_params,
+            'latency_ms': avg_latency,
+            'metrics': metrics,
+            'args': vars(args)
         }
         
-        with open(output_dir / 'complete_results.json', 'w') as f:
-            json.dump(complete_results, f, indent=2)
+        with open(output_dir / 'metrics.json', 'w') as f:
+            json.dump(results, f, indent=2)
         
-        print(f"\nResults saved to {output_dir}")
+        # Save predictions
+        np.savez(
+            output_dir / 'predictions.npz',
+            pred_depths=all_pred_depths,
+            gt_depths=all_gt_depths,
+            gaze_positions=np.array(all_gaze_positions)
+        )
+        
+        # Create visualizations
+        if args.visualize:
+            print("\nCreating visualizations...")
+            fig = visualize_predictions(model, data_loader, device, args.num_vis_samples)
+            fig.savefig(output_dir / 'visualizations.png', dpi=150, bbox_inches='tight')
+            plt.close()
+        
+        # Save error distribution plot
+        errors = np.abs(all_pred_depths - all_gt_depths)
+        plt.figure(figsize=(10, 6))
+        plt.hist(errors, bins=50, edgecolor='black', alpha=0.7)
+        plt.axvline(metrics['mae'], color='red', linestyle='--', label=f'MAE: {metrics["mae"]:.3f}m')
+        plt.axvline(metrics['median_error'], color='green', linestyle='--', label=f'Median: {metrics["median_error"]:.3f}m')
+        plt.xlabel('Absolute Error (m)')
+        plt.ylabel('Count')
+        plt.title(f'Error Distribution - {args.model} Model')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.savefig(output_dir / 'error_distribution.png', dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        print(f"\nResults saved to: {output_dir}")
+    
+    return metrics
 
 
-if __name__ == "__main__":
-    main()
+if __name__ == '__main__':
+    args = parse_args()
+    evaluate(args)

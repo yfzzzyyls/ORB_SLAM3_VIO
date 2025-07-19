@@ -82,21 +82,7 @@ python evaluate_lowres.py \
 ```
 **Results**: 88×88 dense depth map, 3.58ms latency, 16.8% error at gaze
 
-#### Approach 3: Gaze-Only with RT-MonoDepth Encoder (Original)
-```bash
-# Use RT-MonoDepth encoder + MLP decoder for single point
-python train_gaze_only_original_init.py \
-    --data-root ./processed_data \
-    --epochs 30 \
-    --batch-size 64 \
-    --lr 3e-4 \
-    --use-patch-encoder \
-    --patch-size 96 \
-    --patch-output-dim 128
-```
-**Results**: 1.41M params, MAE ~0.53m at gaze location only
-
-#### Approach 4: Lightweight Gaze-Only (RECOMMENDED)
+#### Approach 3: Lightweight Gaze-Only (RECOMMENDED)
 ```bash
 # 3-Level lightweight encoder (Best performance)
 python train_lightweight_gaze.py \
@@ -128,47 +114,73 @@ python train_lightweight_gaze.py \
 
 ### 4. Evaluate
 
-#### Full Resolution Evaluation
+#### Lightweight Gaze-Only Model (RECOMMENDED)
 ```bash
-# Evaluate on test dataset (default)
-python evaluate.py \
-    --checkpoint checkpoints/best_model.pth \
-    --data-root ./processed_data
-
-# With batch size adjustment for larger GPUs
-python evaluate.py \
-    --checkpoint checkpoints/best_model.pth \
+# 3-level encoder (354K params) - Best accuracy
+python evaluate_gaze_only.py \
+    --checkpoint ./checkpoints/lightweight_gaze/level3_ch32/checkpoint_best.pth \
     --data-root ./processed_data \
-    --batch-size 16
+    --model lightweight \
+    --encoder-levels 3 \
+    --base-channels 32 \
+    --batch-size 64 \
+    --save-results \
+    --visualize
+
+# 2-level encoder (114K params) - Ultra-lightweight
+python evaluate_gaze_only.py \
+    --checkpoint ./checkpoints/lightweight_gaze/level2_ch32/checkpoint_best.pth \
+    --data-root ./processed_data \
+    --model lightweight \
+    --encoder-levels 2 \
+    --base-channels 32 \
+    --batch-size 128 \
+    --save-results
 ```
 
-#### Low Resolution Evaluation
+#### Dense Low-Res Model (88×88)
 ```bash
-# Evaluate low-res model on test dataset
-python evaluate_lowres.py \
-    --checkpoint ./checkpoints/lowres_16x/checkpoint_best.pth \
-    --data-root ./processed_data \
-    --lowres-scale 16 \
-    --save-results
-
-# Evaluate with larger batch size (faster)
+# Evaluate dense model with gaze-specific metrics
 python evaluate_lowres.py \
     --checkpoint ./checkpoints/lowres_16x/checkpoint_best.pth \
     --data-root ./processed_data \
     --lowres-scale 16 \
     --batch-size 64 \
     --save-results
-
-# Test downsampling pipeline
-python test_lowres_pipeline.py --data-root ./processed_data --visualize
 ```
 
+#### Original Gaze-Only Model
+```bash
+python evaluate_gaze_only.py \
+    --checkpoint ./checkpoints/gaze_only/checkpoint_best.pth \
+    --data-root ./processed_data \
+    --model original \
+    --batch-size 64 \
+    --save-results
+```
+
+#### Full Resolution Evaluation
+```bash
+# Evaluate on test dataset (default)
+python evaluate.py \
+    --checkpoint checkpoints/best_model.pth \
+    --data-root ./processed_data \
+    --batch-size 16
+```
+
+#### Expected Results
+
+| Model | Params | Latency | MAE | RMSE | Max Error | δ < 1.25 |
+|-------|--------|---------|-----|------|-----------|----------|
+| **Lightweight (3-level)** | 354K | 0.62ms | 0.399m | 0.590m | 4.83m | 78.1% |
+| Dense Low-Res | 914K | 2.43ms | 0.418m | 0.518m | 1.23m | 74.8% |
+| Original Gaze | 1.41M | ~2ms | ~0.53m | ~0.65m | ~5m | ~75% |
+
 The evaluation will report:
-- **Standard metrics**: abs_rel, sq_rel, RMSE, a1-a3 accuracy
-- **Gaze-specific metrics**: MAE, RMSE, and relative error at gaze location
-- **Latency statistics**: Mean, median, min/max, percentiles, and throughput (FPS)
-  - Low-res (88×88): Expected ~2-5ms per frame on GPU
-  - Full-res (1408×1408): Expected ~20-50ms per frame on GPU
+- **Standard metrics**: MAE, RMSE, abs_rel, sq_rel, log_mae, δ accuracies
+- **Error statistics**: Median, std, min/max errors
+- **Latency**: Inference time per frame and FPS
+- **Training info**: Best validation metrics from checkpoint
 
 ### 5. Export to TensorRT (optional)
 ```bash

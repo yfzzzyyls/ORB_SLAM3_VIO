@@ -167,11 +167,9 @@ def save_qualitative_results(outputs_dir: Path, batch_idx: int, batch: Dict,
 
 def compute_gaze_metrics(batch: Dict, pred_depth: torch.Tensor, gt_depth: torch.Tensor) -> Dict[str, float]:
     """Compute metrics specifically at gaze locations."""
-    gaze_metrics = {
-        'gaze_mae': [],
-        'gaze_rmse': [],
-        'gaze_rel': []
-    }
+    gaze_errors = []
+    gaze_pred = []
+    gaze_gt = []
     
     batch_size = pred_depth.size(0)
     
@@ -189,25 +187,49 @@ def compute_gaze_metrics(batch: Dict, pred_depth: torch.Tensor, gt_depth: torch.
             pred_at_gaze = pred_depth[i, 0, gaze_y, gaze_x].item()
             gt_at_gaze = gt_depth[i, 0, gaze_y, gaze_x].item()
             
-            if gt_at_gaze > 0:  # Valid ground truth
-                mae = abs(pred_at_gaze - gt_at_gaze)
-                rmse = (pred_at_gaze - gt_at_gaze) ** 2
-                rel = mae / gt_at_gaze
-                
-                gaze_metrics['gaze_mae'].append(mae)
-                gaze_metrics['gaze_rmse'].append(rmse)
-                gaze_metrics['gaze_rel'].append(rel)
+            if gt_at_gaze > 0.1 and gt_at_gaze < 10.0 and np.isfinite(pred_at_gaze):  # Valid ground truth
+                error = abs(pred_at_gaze - gt_at_gaze)
+                gaze_errors.append(error)
+                gaze_pred.append(pred_at_gaze)
+                gaze_gt.append(gt_at_gaze)
     
-    # Average metrics
+    # Compute comprehensive metrics
     result = {}
-    for key, values in gaze_metrics.items():
-        if len(values) > 0:
-            if key == 'gaze_rmse':
-                result[key] = np.sqrt(np.mean(values))
-            else:
-                result[key] = np.mean(values)
-        else:
-            result[key] = 0.0
+    if len(gaze_errors) > 0:
+        gaze_errors = np.array(gaze_errors)
+        gaze_pred = np.array(gaze_pred)
+        gaze_gt = np.array(gaze_gt)
+        
+        # Basic metrics
+        result['gaze_mae'] = np.mean(gaze_errors)
+        result['gaze_rmse'] = np.sqrt(np.mean((gaze_pred - gaze_gt) ** 2))
+        result['gaze_abs_rel'] = np.mean(gaze_errors / (gaze_gt + 1e-6))
+        result['gaze_sq_rel'] = np.mean((gaze_pred - gaze_gt) ** 2 / (gaze_gt ** 2 + 1e-6))
+        result['gaze_log_mae'] = np.mean(np.abs(np.log(gaze_pred + 1e-6) - np.log(gaze_gt + 1e-6)))
+        
+        # Threshold accuracies
+        ratio = np.maximum(gaze_pred / gaze_gt, gaze_gt / gaze_pred)
+        result['gaze_delta_1'] = np.mean(ratio < 1.25) * 100
+        result['gaze_delta_2'] = np.mean(ratio < 1.25 ** 2) * 100
+        result['gaze_delta_3'] = np.mean(ratio < 1.25 ** 3) * 100
+        
+        # Error statistics
+        result['gaze_median_error'] = np.median(gaze_errors)
+        result['gaze_std_error'] = np.std(gaze_errors)
+        result['gaze_min_error'] = np.min(gaze_errors)
+        result['gaze_max_error'] = np.max(gaze_errors)
+        
+        # For backward compatibility
+        result['gaze_rel'] = result['gaze_abs_rel']
+    else:
+        # Return zeros if no valid gaze data
+        result = {
+            'gaze_mae': 0.0, 'gaze_rmse': 0.0, 'gaze_abs_rel': 0.0,
+            'gaze_sq_rel': 0.0, 'gaze_log_mae': 0.0, 'gaze_delta_1': 0.0,
+            'gaze_delta_2': 0.0, 'gaze_delta_3': 0.0, 'gaze_median_error': 0.0,
+            'gaze_std_error': 0.0, 'gaze_min_error': 0.0, 'gaze_max_error': 0.0,
+            'gaze_rel': 0.0
+        }
     
     return result
 
@@ -422,36 +444,47 @@ def main():
         scale_factor=args.lowres_scale
     )
     
-    # Print results
-    print("\nTest Results:")
-    print("-" * 40)
+    # Print results in same format as lightweight evaluation
+    print("\n" + "="*50)
+    print("Evaluation Results - Dense Low-Res Model")
+    print("="*50)
+    print(f"Checkpoint: {Path(args.checkpoint).name}")
+    print(f"Dataset: test split ({len(test_dataset)} samples)")
+    print(f"Model Parameters: {sum(p.numel() for p in model.parameters()):,} ({sum(p.numel() for p in model.parameters())/1e6:.2f}M)")
     
-    # Standard metrics
-    standard_metrics = ['abs_rel', 'sq_rel', 'rmse', 'rmse_log', 'a1', 'a2', 'a3']
-    for metric in standard_metrics:
-        if metric in metrics:
-            print(f"{metric:10s}: {metrics[metric]:.3f}")
-    
-    # Gaze metrics if available
-    if 'gaze_mae' in metrics:
-        print("\nGaze-specific Metrics:")
-        print("-" * 40)
-        print(f"{'gaze_mae':10s}: {metrics['gaze_mae']:.3f}")
-        print(f"{'gaze_rmse':10s}: {metrics['gaze_rmse']:.3f}")
-        print(f"{'gaze_rel':10s}: {metrics['gaze_rel']:.3f}")
-    
-    # Latency metrics
+    # Print latency first if available
     if 'latency_mean_ms' in metrics:
-        print("\nLatency Statistics (per frame):")
-        print("-" * 40)
-        print(f"Mean:       {metrics['latency_mean_ms']:.2f} ms")
-        print(f"Std:        {metrics['latency_std_ms']:.2f} ms")
-        print(f"Median:     {metrics['latency_median_ms']:.2f} ms")
-        print(f"Min:        {metrics['latency_min_ms']:.2f} ms")
-        print(f"Max:        {metrics['latency_max_ms']:.2f} ms")
-        print(f"95th %ile:  {metrics['latency_p95_ms']:.2f} ms")
-        print(f"99th %ile:  {metrics['latency_p99_ms']:.2f} ms")
-        print(f"\nThroughput: {1000.0/metrics['latency_mean_ms']:.1f} FPS")
+        print(f"Inference Latency: {metrics['latency_mean_ms']:.2f}ms ({1000/metrics['latency_mean_ms']:.1f} FPS)")
+    
+    print("\nDepth Prediction Metrics (Full Image):")
+    print(f"  MAE:          N/A (not computed for full image)")
+    print(f"  RMSE:         {metrics.get('rmse', 0):.4f}m")
+    print(f"  Abs Rel:      {metrics.get('abs_rel', 0):.4f}")
+    print(f"  Sq Rel:       {metrics.get('sq_rel', 0):.4f}")
+    print(f"  Log MAE:      {metrics.get('rmse_log', 0):.4f}")
+    print(f"  delta < 1.25:     {metrics.get('a1', 0):.1f}%")
+    print(f"  delta < 1.25^2:   {metrics.get('a2', 0):.1f}%")
+    print(f"  delta < 1.25^3:   {metrics.get('a3', 0):.1f}%")
+    
+    # Gaze-specific metrics (matching lightweight format)
+    if 'gaze_mae' in metrics:
+        print("\nDepth Prediction Metrics (At Gaze Only):")
+        print(f"  MAE:          {metrics['gaze_mae']:.4f}m")
+        print(f"  RMSE:         {metrics['gaze_rmse']:.4f}m")
+        print(f"  Abs Rel:      {metrics['gaze_abs_rel']:.4f}")
+        print(f"  Sq Rel:       {metrics['gaze_sq_rel']:.4f}")
+        print(f"  Log MAE:      {metrics['gaze_log_mae']:.4f}")
+        print(f"  delta < 1.25:     {metrics['gaze_delta_1']:.1f}%")
+        print(f"  delta < 1.25^2:   {metrics['gaze_delta_2']:.1f}%")
+        print(f"  delta < 1.25^3:   {metrics['gaze_delta_3']:.1f}%")
+        
+        print(f"\nError Statistics (At Gaze):")
+        print(f"  Median Error: {metrics['gaze_median_error']:.4f}m")
+        print(f"  Std Error:    {metrics['gaze_std_error']:.4f}m")
+        print(f"  Min Error:    {metrics['gaze_min_error']:.4f}m")
+        print(f"  Max Error:    {metrics['gaze_max_error']:.4f}m")
+    
+    print("="*50)
     
     # Save results
     results = {
