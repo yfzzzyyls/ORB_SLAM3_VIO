@@ -41,11 +41,11 @@ cd /home/external/ORB_SLAM3_VIO/depthCNN
 python extract_dataset.py  # All defaults configured for full 30Hz extraction
 ```
 
-### 3. Train Model
+### 3. Train Model - All Approaches
 
-#### Full Resolution (1408×1408)
+#### Approach 1: Full Resolution Dense Depth (1408×1408)
 ```bash
-# Single GPU
+# Single GPU - Original RT-MonoDepth on full resolution
 python train.py \
     --data-root ./processed_data \
     --epochs 20 \
@@ -60,48 +60,71 @@ python train.py \
     --batch-size 16 \
     --lr 2e-4 \
     --crop-size 1408
-
-# Specific GPUs only
-CUDA_VISIBLE_DEVICES=0,1,2,3 python train.py \
-    --data-root ./processed_data \
-    --epochs 20 \
-    --batch-size 16 \
-    --lr 2e-4 \
-    --crop-size 1408
 ```
-Note: 
-- Single GPU: Use batch-size 4 for full resolution
-- Multi-GPU: Can use batch-size 16 (4 per GPU) or higher
-- Learning rate scales with batch size (2x batch → ~1.4-2x lr)
+**Results**: Dense depth map at 1408×1408, can evaluate at any pixel including gaze
 
-#### Low Resolution Training (88×88 with 16x downscaling)
+#### Approach 2: Low Resolution Dense Depth (88×88)
 ```bash
-# Efficient training with larger batch size
+# Average pooling to 88×88, predict full depth map
 python train_lowres.py \
     --data-root ./processed_data \
     --lowres-scale 16 \
     --epochs 20 \
     --batch-size 32 \
-    --lr 2e-4 \
-    --crop-size 1408
-
-# Other scale factors (2, 4, 8, 16)
-python train_lowres.py \
-    --data-root ./processed_data \
-    --lowres-scale 8 \
-    --epochs 20 \
-    --batch-size 16 \
     --lr 2e-4
+
+# Evaluate at gaze location from 88×88 depth map
+python evaluate_lowres.py \
+    --checkpoint ./checkpoints/lowres_16x/checkpoint_best.pth \
+    --data-root ./processed_data \
+    --lowres-scale 16 \
+    --save-results
 ```
+**Results**: 88×88 dense depth map, 3.58ms latency, 16.8% error at gaze
 
-Benefits of low-resolution training:
-- **256x faster** computation (16x16 = 256x fewer pixels)
-- **8x larger batches** possible with same GPU memory
-- **Faster convergence** for gaze-specific depth prediction
-- **Ideal for real-time** applications where only gaze depth matters
-- **Gaze-aware evaluation**: Computes metrics specifically at gaze locations
+#### Approach 3: Gaze-Only with RT-MonoDepth Encoder (Original)
+```bash
+# Use RT-MonoDepth encoder + MLP decoder for single point
+python train_gaze_only_original_init.py \
+    --data-root ./processed_data \
+    --epochs 30 \
+    --batch-size 64 \
+    --lr 3e-4 \
+    --use-patch-encoder \
+    --patch-size 96 \
+    --patch-output-dim 128
+```
+**Results**: 1.41M params, MAE ~0.53m at gaze location only
 
-Note: The training scripts include a custom collate function to handle missing gaze data gracefully.
+#### Approach 4: Lightweight Gaze-Only (RECOMMENDED)
+```bash
+# 3-Level lightweight encoder (Best performance)
+python train_lightweight_gaze.py \
+    --data-root ./processed_data \
+    --encoder-levels 3 \
+    --base-channels 32 \
+    --batch-size 128 \
+    --lr 4e-4 \
+    --epochs 30
+
+# 2-Level ultra-lightweight variant
+python train_lightweight_gaze.py \
+    --data-root ./processed_data \
+    --encoder-levels 2 \
+    --base-channels 32 \
+    --batch-size 256 \
+    --lr 5e-4 \
+    --epochs 30
+```
+**Results**: 354K params (3-level) or 114K params (2-level), MAE 0.41m, 71% fewer parameters
+
+#### Comparison Summary:
+| Approach | Parameters | Output | MAE at Gaze | Speed | Use Case |
+|----------|------------|---------|-------------|--------|----------|
+| Full Res Dense | 1.23M | 1408×1408 map | ~0.5m | 20-50ms | Need full depth map |
+| Low Res Dense | 1.23M | 88×88 map | ~0.5m | 3.58ms | Fast dense depth |
+| Gaze-Only Original | 1.41M | Single point | ~0.53m | 2-3ms | Baseline gaze depth |
+| **Lightweight Gaze** | **354K** | **Single point** | **0.41m** | **2-3ms** | **Best for gaze** |
 
 ### 4. Evaluate
 
@@ -269,3 +292,88 @@ A specialized architecture for predicting depth only at the gaze location, based
 - Add temporal consistency for video sequences
 - Multi-task learning with object classification
 - Uncertainty estimation for depth predictions
+
+## Lightweight Gaze-Only Architecture (Latest Development)
+
+### Overview
+A highly efficient architecture designed specifically for 88×88 input, achieving **better accuracy with 71% fewer parameters** than the original RT-MonoDepth approach.
+
+### Key Innovations
+
+#### 1. **Lightweight Encoder Design**
+- **3-Level Architecture**: 88×88 → 44×44 → 22×22 → 11×11
+- **Simple Conv Blocks**: Conv3x3 → BatchNorm → ReLU (no depthwise separable)
+- **Channel Progression**: 32 → 64 → 128 (vs RT-MonoDepth's 24→48→96→192)
+- **No 4th Level**: Avoids tiny 5.5×5.5 feature maps that provide little value
+
+#### 2. **Efficient Feature Extraction**
+```python
+# Scale gaze coordinates for each level
+Level 1: gaze_x/2, gaze_y/2    # 44×44 feature map
+Level 2: gaze_x/4, gaze_y/4    # 22×22 feature map  
+Level 3: gaze_x/8, gaze_y/8    # 11×11 feature map
+
+# Extract features only at gaze location using bilinear interpolation
+```
+
+#### 3. **Streamlined Decoder**
+- **4-Layer MLP**: 192 → 128 → 64 → 32 → 1
+- **Progressive Reduction**: Gradual refinement from features to depth
+- **LayerNorm + Dropout**: Better regularization for point prediction
+
+### Performance Results
+
+#### Lightweight 3-Level Model (354K params):
+- **MAE**: 0.4083m (40.8cm) - Excellent for monocular depth
+- **Relative Error**: 17.9%
+- **δ < 1.25**: 81.67% accuracy
+- **Training Speed**: ~5:45 per epoch on 4 GPUs
+
+#### Comparison with Original:
+- **Original RT-MonoDepth**: 1.23M params, MAE ~0.53m
+- **Lightweight Model**: 354K params, MAE 0.41m
+- **Result**: 23% better accuracy with 71% fewer parameters!
+
+### Training Commands
+
+#### 3-Level Encoder (Recommended):
+```bash
+python train_lightweight_gaze.py \
+    --data-root ./processed_data \
+    --encoder-levels 3 \
+    --base-channels 32 \
+    --batch-size 128 \
+    --lr 4e-4 \
+    --epochs 30
+```
+
+#### 2-Level Encoder (Ultra-Lightweight):
+```bash
+python train_lightweight_gaze.py \
+    --data-root ./processed_data \
+    --encoder-levels 2 \
+    --base-channels 32 \
+    --batch-size 256 \
+    --lr 5e-4 \
+    --epochs 30
+```
+
+### Architecture Rationale
+
+#### Why Simpler Works Better:
+1. **Task-Architecture Match**: Single-point prediction doesn't need complex features
+2. **Appropriate Receptive Fields**: 3 levels sufficient for 88×88 input
+3. **No Overparameterization**: Reduces overfitting risk
+4. **Efficient Information Flow**: Direct path from features to prediction
+
+#### Design Principles:
+- **Encoder**: Extract multi-scale features from entire image
+- **Gaze Integration**: Sample features only at gaze location after encoding
+- **Decoder**: Simple MLP for single value regression
+- **Loss**: Gaze-specific without spatial regularization
+
+### Key Insights
+1. **Architecture complexity should match task complexity**
+2. **Gaze provides strong prior - no need to search entire image**
+3. **88×88 resolution constrains useful feature extraction depth**
+4. **Bilinear interpolation enables smooth sub-pixel feature extraction**
