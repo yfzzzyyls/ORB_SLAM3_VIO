@@ -102,10 +102,14 @@ def custom_collate_fn(batch):
         gt_depth_at_gaze = sample['gt_depth_at_gaze']
         
         # Apply augmentation
-        rgb, depth, gaze_x, gaze_y = augmentation(rgb, depth, gaze_x, gaze_y)
+        # Get image size from the RGB tensor
+        _, H, W = rgb.shape
+        rgb, depth, gaze_x, gaze_y = augmentation(rgb, depth, gaze_x, gaze_y, img_size=W)
         
         # Validate gaze is still in bounds after augmentation
-        if 0 <= gaze_x < 88 and 0 <= gaze_y < 88:
+        # Get image size from the RGB tensor
+        _, H, W = rgb.shape
+        if 0 <= gaze_x < W and 0 <= gaze_y < H:
             rgb_list.append(rgb)
             depth_list.append(depth)
             gaze_x_list.append(gaze_x)
@@ -161,7 +165,7 @@ def train_epoch(model, dataloader, optimizer, loss_fn, device, logger,
     total_loss = 0
     total_main_loss = 0
     total_aux_loss = 0
-    num_batches = 0
+    num_samples = 0  # Track samples instead of batches for proper averaging
     
     pbar = tqdm(dataloader, desc='Training')
     for batch in pbar:
@@ -173,6 +177,8 @@ def train_epoch(model, dataloader, optimizer, loss_fn, device, logger,
         gaze_x = batch['gaze_x'].to(device)
         gaze_y = batch['gaze_y'].to(device)
         gt_depth = batch['gt_depth_at_gaze'].to(device)  # Use exact GT depth
+        
+        batch_size = rgb.size(0)
         
         # Forward pass
         outputs = model(rgb, gaze_x, gaze_y)
@@ -199,22 +205,30 @@ def train_epoch(model, dataloader, optimizer, loss_fn, device, logger,
         
         optimizer.step()
         
-        # Update stats
-        total_loss += loss.item()
-        total_main_loss += main_loss.item()
-        if isinstance(aux_loss, torch.Tensor):
-            total_aux_loss += aux_loss.item()
-        num_batches += 1
+        # Update stats - accumulate total loss weighted by batch size
+        # This ensures proper averaging when batches have different sizes
+        loss_value = loss.item()
+        main_loss_value = main_loss.item()
+        aux_loss_value = aux_loss.item() if isinstance(aux_loss, torch.Tensor) else 0
+        
+        total_loss += loss_value * batch_size
+        total_main_loss += main_loss_value * batch_size
+        total_aux_loss += aux_loss_value * batch_size
+        num_samples += batch_size
         
         # Update progress bar
-        pbar.set_postfix({
-            'loss': f'{loss.item():.4f}',
-            'main': f'{main_loss.item():.4f}'
-        })
+        postfix_dict = {
+            'loss': f'{loss_value:.4f}',
+            'main': f'{main_loss_value:.4f}'
+        }
+        if aux_loss_value > 0:
+            postfix_dict['aux'] = f'{aux_loss_value:.4f}'
+        pbar.set_postfix(postfix_dict)
     
-    avg_loss = total_loss / num_batches if num_batches > 0 else 0
-    avg_main_loss = total_main_loss / num_batches if num_batches > 0 else 0
-    avg_aux_loss = total_aux_loss / num_batches if num_batches > 0 else 0
+    # Average over all samples, not batches
+    avg_loss = total_loss / num_samples if num_samples > 0 else 0
+    avg_main_loss = total_main_loss / num_samples if num_samples > 0 else 0
+    avg_aux_loss = total_aux_loss / num_samples if num_samples > 0 else 0
     
     return avg_loss, avg_main_loss, avg_aux_loss
 

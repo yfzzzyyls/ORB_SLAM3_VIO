@@ -389,3 +389,114 @@ python train_lightweight_gaze.py \
 2. **Gaze provides strong prior - no need to search entire image**
 3. **88×88 resolution constrains useful feature extraction depth**
 4. **Bilinear interpolation enables smooth sub-pixel feature extraction**
+
+## Flexible Resolution Training (NEW - Addresses Spatial Ambiguity)
+
+### Overview
+A new flexible training system that supports variable image sizes and encoder levels to address the spatial ambiguity issues in the 88×88 model. The key insight: at 88×88 with 3-level encoding, each spatial location in the deepest feature map represents an 8×8 patch, causing ±4 pixel uncertainty in gaze localization.
+
+### Supported Configurations
+
+#### 1. **352×352 with 4-Level Encoder (RECOMMENDED)**
+```bash
+python train_flexible_gaze.py \
+    --data-root ./processed_data \
+    --image-size 352 \
+    --encoder-levels 4 \
+    --base-channels 32 \
+    --batch-size 64 \
+    --lr 2e-3 \
+    --lr-scaling sqrt \
+    --num-workers 4 \
+    --epochs 30 \
+    --checkpoint-dir ./checkpoints/gaze_352_4level
+```
+- **Spatial Precision**: 16× better than 88×88
+- **Receptive Field**: ~112 pixels (4× larger)
+- **Feature Maps**: 352→176→88→44→22
+- **Gaze Uncertainty**: ±2 pixels in original space
+- **Expected Results**: Significantly reduced RMSE and max error
+
+#### 2. **176×176 with 3-Level Encoder (Balanced)**
+```bash
+python train_flexible_gaze.py \
+    --data-root ./processed_data \
+    --image-size 176 \
+    --encoder-levels 3 \
+    --base-channels 32 \
+    --batch-size 128 \
+    --lr 3e-3 \
+    --lr-scaling sqrt \
+    --num-workers 4 \
+    --epochs 30 \
+    --checkpoint-dir ./checkpoints/gaze_176_3level
+```
+- **Spatial Precision**: 4× better than 88×88
+- **Memory Efficient**: Still fits large batches
+- **Good compromise between accuracy and speed**
+
+#### 3. **88×88 with 3-Level Encoder (Original)**
+```bash
+python train_flexible_gaze.py \
+    --data-root ./processed_data \
+    --image-size 88 \
+    --encoder-levels 3 \
+    --base-channels 32 \
+    --batch-size 128 \
+    --lr 4e-4 \
+    --epochs 30 \
+    --checkpoint-dir ./checkpoints/gaze_88_3level
+```
+- Equivalent to the lightweight model configuration
+- Baseline for comparison
+
+#### 4. **Full Resolution 1408×1408 (Memory Intensive)**
+```bash
+# WARNING: Use small batch size and num_workers=0 to avoid system crashes
+python train_flexible_gaze.py \
+    --data-root ./processed_data \
+    --image-size 1408 \
+    --encoder-levels 5 \
+    --base-channels 48 \
+    --batch-size 32 \
+    --lr 1.4e-3 \
+    --lr-scaling sqrt \
+    --num-workers 0 \
+    --epochs 30 \
+    --checkpoint-dir ./checkpoints/gaze_1408_5level
+```
+
+### Architecture Details
+
+The flexible encoder automatically adapts to the input size:
+- **Channel Progression**: base_channels × (1.5^level)
+- **Feature Extraction**: Multi-scale bilinear sampling at gaze location
+- **MLP Decoder**: Adapts input dimension based on total features
+- **Memory Scaling**: ~(image_size/88)² relative to baseline
+
+### Why This Addresses High Variance
+
+The 88×88 model's high RMSE (0.6m) and max error (4.83m) are primarily due to:
+1. **Spatial Ambiguity**: Each feature represents 8×8 pixels
+2. **Limited Context**: Small receptive field misses larger objects
+3. **Quantization Error**: Coarse feature maps lose fine details
+
+The 352×352 configuration solves these by:
+1. **16× Better Precision**: Each feature represents 2×2 pixels
+2. **Larger Context**: 112-pixel receptive field captures full objects
+3. **Fine-Grained Features**: 22×22 final feature map vs 11×11
+
+### Expected Improvements
+
+Based on the spatial precision increase, we expect:
+- **RMSE**: 0.6m → ~0.3-0.4m (30-50% reduction)
+- **Max Error**: 4.83m → ~2-3m (40-60% reduction)
+- **MAE**: 0.41m → ~0.35m (modest improvement)
+
+### Training Tips
+
+1. **Start with 352×352**: Best balance of accuracy and efficiency
+2. **Use sqrt LR scaling**: Helps with larger batch sizes
+3. **Monitor memory**: Larger images need more GPU/CPU RAM
+4. **Gradual increases**: Try 176→352→704 if needed
+5. **Keep num_workers low**: Prevents memory issues with large images
