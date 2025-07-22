@@ -92,6 +92,8 @@ class FlexibleResolutionDataset(ProcessedADTDataset):
         # Load and scale gaze information if available
         gaze_info = None
         gt_depth_at_gaze = None
+        depth_patch_stats = None
+        
         if 'gaze' in frame_info and frame_info.get('has_gaze', False):
             try:
                 gaze_path = frame_info['seq_dir'] / 'gaze' / frame_info['gaze']
@@ -124,10 +126,20 @@ class FlexibleResolutionDataset(ProcessedADTDataset):
                     # Ensure scaled coordinates are within bounds
                     gaze_info['x'] = max(0, min(gaze_info['x'], self.target_size - 1))
                     gaze_info['y'] = max(0, min(gaze_info['y'], self.target_size - 1))
+                    
+                    # Extract depth patch and compute statistics from RESIZED depth
+                    # This ensures consistency with what the model sees
+                    depth_patch_stats = self._extract_depth_patch_statistics(
+                        depth_resized.squeeze(0).numpy(),  # Remove channel dimension
+                        gaze_info['x'],
+                        gaze_info['y']
+                    )
+                    
             except Exception as e:
                 # If there's any error loading gaze, just skip it
                 gaze_info = None
                 gt_depth_at_gaze = None
+                depth_patch_stats = None
         
         # Apply transforms if any (on resized data)
         if self.transform:
@@ -143,10 +155,92 @@ class FlexibleResolutionDataset(ProcessedADTDataset):
             'frame_idx': frame_info['index'],
             'gaze': gaze_info,
             'gt_depth_at_gaze': gt_depth_at_gaze,  # Exact depth at gaze position
+            'depth_patch_stats': depth_patch_stats,  # Statistics from patch around gaze
             'scale_factor': self.scale_factor,
             'original_size': self.original_size,
             'target_size': self.target_size
         }
+    
+    def _extract_depth_patch_statistics(self, depth_map, gaze_x, gaze_y):
+        """Extract statistics from a patch around the gaze point.
+        
+        Args:
+            depth_map: 2D numpy array of depth values (already resized)
+            gaze_x: x coordinate in resized image
+            gaze_y: y coordinate in resized image
+            
+        Returns:
+            Dictionary of statistics or None if patch extraction fails
+        """
+        # Patch size (16x16 for consistency across resolutions)
+        patch_size = 16
+        half_patch = patch_size // 2
+        
+        # Get patch boundaries
+        x_center = int(round(gaze_x))
+        y_center = int(round(gaze_y))
+        
+        x_start = max(0, x_center - half_patch)
+        x_end = min(depth_map.shape[1], x_center + half_patch)
+        y_start = max(0, y_center - half_patch)
+        y_end = min(depth_map.shape[0], y_center + half_patch)
+        
+        # Extract patch
+        depth_patch = depth_map[y_start:y_end, x_start:x_end]
+        
+        # Check if patch is valid
+        if depth_patch.size == 0:
+            return None
+            
+        # Filter out invalid depths (0 or negative)
+        valid_depths = depth_patch[depth_patch > 0]
+        
+        if len(valid_depths) < 10:  # Need at least 10 valid pixels
+            return None
+        
+        # Compute statistics
+        stats = {
+            # Basic statistics
+            'mean': float(np.mean(valid_depths)),
+            'std': float(np.std(valid_depths) + 1e-6),  # Add epsilon for stability
+            'median': float(np.median(valid_depths)),
+            'min': float(np.min(valid_depths)),
+            'max': float(np.max(valid_depths)),
+            'range': float(np.max(valid_depths) - np.min(valid_depths)),
+            
+            # Gradient information (computed on full patch including zeros)
+            'grad_x_mean': float(np.mean(np.abs(np.gradient(depth_patch, axis=1)))),
+            'grad_y_mean': float(np.mean(np.abs(np.gradient(depth_patch, axis=0)))),
+            'grad_magnitude': float(np.sqrt(
+                np.mean(np.gradient(depth_patch, axis=1)**2) + 
+                np.mean(np.gradient(depth_patch, axis=0)**2)
+            )),
+            
+            # Relative metrics
+            'coeff_var': float(np.std(valid_depths) / (np.mean(valid_depths) + 1e-6)),  # Normalized variance
+            
+            # Edge detection (high gradient relative to mean depth)
+            'edge_score': float(np.max([
+                np.mean(np.abs(np.gradient(depth_patch, axis=1))),
+                np.mean(np.abs(np.gradient(depth_patch, axis=0)))
+            ]) / (np.mean(valid_depths) + 1e-6)),
+            
+            # Depth bin (for classification task)
+            'depth_bin': self._get_depth_bin(float(np.mean(valid_depths))),
+            
+            # Valid pixel ratio (how much of patch is valid)
+            'valid_ratio': float(len(valid_depths) / depth_patch.size)
+        }
+        
+        return stats
+    
+    def _get_depth_bin(self, depth):
+        """Convert depth to categorical bin."""
+        bins = [0, 2, 4, 6, 8, float('inf')]
+        for i, threshold in enumerate(bins[1:]):
+            if depth < threshold:
+                return i
+        return len(bins) - 2  # Last bin
     
     def _build_frame_index(self):
         """Build index of all frames, including gaze file information."""

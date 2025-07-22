@@ -22,9 +22,178 @@ import logging
 sys.path.append(str(Path(__file__).parent))
 
 from flexible_dataset import FlexibleResolutionDataset
-from flexible_gaze_encoder import FlexibleGazeOnlyDepth
+from flexible_gaze_encoder import FlexibleGazeOnlyDepth, MultiTaskGazeLoss
 from gaze_only_rtmonodepth import GazeDepthLoss
 from train_gaze_only import custom_collate_fn, save_checkpoint, setup_logging, validate
+
+
+def train_epoch_multitask(model, dataloader, optimizer, loss_fn, device, logger):
+    """Train for one epoch with multi-task learning."""
+    model.train()
+    
+    total_loss = 0
+    task_losses = {}
+    num_samples = 0
+    
+    pbar = tqdm(dataloader, desc='Training')
+    for batch in pbar:
+        if batch is None:
+            continue
+        
+        # Get data
+        rgb = batch['rgb'].to(device)
+        gaze_x = batch['gaze_x'].to(device)
+        gaze_y = batch['gaze_y'].to(device)
+        
+        batch_size = rgb.size(0)
+        
+        # Forward pass
+        outputs = model(rgb, gaze_x, gaze_y)
+        
+        # Compute multi-task loss
+        loss, loss_dict = loss_fn(outputs, batch)
+        
+        # Backward pass
+        optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        optimizer.step()
+        
+        # Update stats
+        loss_value = loss.item()
+        total_loss += loss_value * batch_size
+        num_samples += batch_size
+        
+        # Accumulate task-specific losses
+        for task, task_loss in loss_dict.items():
+            if task not in task_losses:
+                task_losses[task] = 0
+            task_losses[task] += task_loss.item() * batch_size
+        
+        # Update progress bar
+        postfix_dict = {'loss': f'{loss_value:.4f}'}
+        # Show main task loss
+        if 'depth' in loss_dict:
+            postfix_dict['depth'] = f'{loss_dict["depth"].item():.4f}'
+        pbar.set_postfix(postfix_dict)
+    
+    # Average losses
+    avg_loss = total_loss / num_samples if num_samples > 0 else 0
+    avg_task_losses = {task: loss / num_samples for task, loss in task_losses.items()}
+    
+    return avg_loss, avg_task_losses
+
+
+def validate_multitask(model, dataloader, loss_fn, device, logger):
+    """Validate the model with multi-task outputs."""
+    model.eval()
+    
+    total_loss = 0
+    task_losses = {}
+    num_samples = 0
+    
+    # Metrics storage
+    all_errors = []
+    all_rel_errors = []
+    all_sq_rel_errors = []
+    all_rmse = []
+    all_rmse_log = []
+    all_a1 = []
+    all_a2 = []
+    all_a3 = []
+    
+    pbar = tqdm(dataloader, desc='Validation')
+    with torch.no_grad():
+        for batch in pbar:
+            if batch is None:
+                continue
+            
+            # Get data
+            rgb = batch['rgb'].to(device)
+            gaze_x = batch['gaze_x'].to(device)
+            gaze_y = batch['gaze_y'].to(device)
+            gt_depth = batch['gt_depth_at_gaze'].to(device)
+            
+            batch_size = rgb.size(0)
+            
+            # Forward pass
+            outputs = model(rgb, gaze_x, gaze_y)
+            pred_depth = outputs['depth']
+            
+            # Compute loss (multi-task loss during training, but only depth matters for metrics)
+            if model.training:  # Should be False during validation
+                loss, loss_dict = loss_fn(outputs, batch)
+            else:
+                # For validation, we only care about depth prediction accuracy
+                from gaze_only_rtmonodepth import GazeDepthLoss
+                simple_loss_fn = GazeDepthLoss(alpha=0.85)
+                loss = simple_loss_fn(pred_depth, gt_depth)
+                loss_dict = {'depth': loss}
+            
+            total_loss += loss.item() * batch_size
+            num_samples += batch_size
+            
+            # Accumulate task losses
+            for task, task_loss in loss_dict.items():
+                if task not in task_losses:
+                    task_losses[task] = 0
+                if isinstance(task_loss, torch.Tensor):
+                    task_losses[task] += task_loss.item() * batch_size
+                else:
+                    task_losses[task] += task_loss * batch_size
+            
+            # Compute metrics for each sample
+            for i in range(pred_depth.shape[0]):
+                pred = pred_depth[i].item()
+                gt = gt_depth[i].item()
+                
+                if gt > 0:  # Valid depth
+                    # Absolute error
+                    abs_err = abs(pred - gt)
+                    all_errors.append(abs_err)
+                    
+                    # Relative error
+                    rel_err = abs_err / gt
+                    all_rel_errors.append(rel_err)
+                    
+                    # Squared relative error
+                    sq_rel_err = ((pred - gt) ** 2) / gt
+                    all_sq_rel_errors.append(sq_rel_err)
+                    
+                    # RMSE
+                    all_rmse.append((pred - gt) ** 2)
+                    
+                    # RMSE log
+                    all_rmse_log.append((np.log(pred) - np.log(gt)) ** 2)
+                    
+                    # Threshold accuracy
+                    ratio = max(pred / gt, gt / pred)
+                    all_a1.append(ratio < 1.25)
+                    all_a2.append(ratio < 1.25 ** 2)
+                    all_a3.append(ratio < 1.25 ** 3)
+            
+            # Update progress bar
+            pbar.set_postfix({'loss': f'{loss.item():.4f}'})
+    
+    # Average loss
+    avg_loss = total_loss / num_samples if num_samples > 0 else 0
+    
+    # Compute average metrics
+    metrics = {}
+    if len(all_errors) > 0:
+        metrics['mae'] = np.mean(all_errors)
+        metrics['abs_rel'] = np.mean(all_rel_errors)
+        metrics['sq_rel'] = np.mean(all_sq_rel_errors)
+        metrics['rmse'] = np.sqrt(np.mean(all_rmse))
+        metrics['rmse_log'] = np.sqrt(np.mean(all_rmse_log))
+        metrics['a1'] = np.mean(all_a1)
+        metrics['a2'] = np.mean(all_a2)
+        metrics['a3'] = np.mean(all_a3)
+    
+    # Add task losses to metrics for logging
+    metrics['task_losses'] = {task: loss / num_samples for task, loss in task_losses.items()}
+    
+    return avg_loss, metrics
 
 
 def main():
@@ -45,6 +214,8 @@ def main():
                         help='Dimension for gaze features at each scale')
     parser.add_argument('--image-size', type=int, default=88,
                         help='Input image size (square images)')
+    parser.add_argument('--use-multi-task', action='store_true',
+                        help='Use multi-task learning with patch statistics')
     
     # Training parameters
     parser.add_argument('--epochs', type=int, default=30,
@@ -133,6 +304,8 @@ def main():
     
     # Create model
     logger.info(f"Creating flexible model for {args.image_size}×{args.image_size} images...")
+    logger.info(f"Multi-task learning: {'Enabled' if args.use_multi_task else 'Disabled'}")
+    
     model = FlexibleGazeOnlyDepth(
         num_encoder_levels=args.encoder_levels,
         base_channels=args.base_channels,
@@ -140,7 +313,8 @@ def main():
         image_size=args.image_size,
         max_depth=args.max_depth,
         min_depth=args.min_depth,
-        use_multi_scale_supervision=args.multi_scale_supervision
+        use_multi_scale_supervision=args.multi_scale_supervision,
+        use_multi_task=args.use_multi_task
     )
     
     # Move model to device
@@ -178,7 +352,12 @@ def main():
     logger.info(f"  Theoretical receptive field: {receptive_field} pixels")
     
     # Loss function
-    loss_fn = GazeDepthLoss(alpha=0.85, grad_weight=0.1, rel_weight=0.1)
+    if args.use_multi_task:
+        loss_fn = MultiTaskGazeLoss(alpha=0.85)
+        logger.info("Using multi-task loss function")
+    else:
+        loss_fn = GazeDepthLoss(alpha=0.85, grad_weight=0.1, rel_weight=0.1)
+        logger.info("Using standard gaze depth loss")
     
     # Scale learning rate based on batch size
     base_batch_size = 32  # Base batch size for reference
@@ -232,29 +411,45 @@ def main():
     # Training loop
     logger.info("Starting training...")
     
-    # Import train_epoch from original script
-    from train_gaze_only import train_epoch
+    # Training functions - we'll define multi-task versions inline below
+    # Standard training functions from train_gaze_only are already imported
     
     for epoch in range(start_epoch, args.epochs):
         logger.info(f"\nEpoch {epoch+1}/{args.epochs}")
         logger.info(f"Learning rate: {scheduler.get_last_lr()[0]:.6f}")
         
         # Train
-        train_loss, train_main_loss, train_aux_loss = train_epoch(
-            model, train_loader, optimizer, loss_fn, device, logger,
-            use_multi_scale_supervision=args.multi_scale_supervision
-        )
-        
-        logger.info(f"Train Loss: {train_loss:.4f} (main: {train_main_loss:.4f}, aux: {train_aux_loss:.4f})")
+        if args.use_multi_task:
+            train_loss, loss_dict = train_epoch_multitask(
+                model, train_loader, optimizer, loss_fn, device, logger
+            )
+            logger.info(f"Train Loss: {train_loss:.4f}")
+            logger.info("Train Losses by Task:")
+            for task, loss in loss_dict.items():
+                logger.info(f"  {task}: {loss:.4f}")
+        else:
+            train_loss, train_main_loss, train_aux_loss = train_epoch(
+                model, train_loader, optimizer, loss_fn, device, logger,
+                use_multi_scale_supervision=args.multi_scale_supervision
+            )
+            logger.info(f"Train Loss: {train_loss:.4f} (main: {train_main_loss:.4f}, aux: {train_aux_loss:.4f})")
         
         # Validate
-        val_loss, val_metrics = validate(
-            model, val_loader, loss_fn, device, logger
-        )
+        if args.use_multi_task:
+            val_loss, val_metrics = validate_multitask(
+                model, val_loader, loss_fn, device, logger
+            )
+        else:
+            val_loss, val_metrics = validate(
+                model, val_loader, loss_fn, device, logger
+            )
         
         logger.info(f"Val Loss: {val_loss:.4f}")
         logger.info("Val Metrics:")
         for name, value in val_metrics.items():
+            if isinstance(value, dict):
+                # Skip nested dictionaries like task_losses
+                continue
             logger.info(f"  {name}: {value:.4f}")
         
         # Update learning rate
@@ -272,16 +467,23 @@ def main():
         )
         
         # Log to file
+        # Filter out nested dicts from val_metrics for JSON serialization
+        clean_val_metrics = {k: v for k, v in val_metrics.items() if not isinstance(v, dict)}
+        
         log_data = {
             'epoch': epoch,
             'train_loss': train_loss,
-            'train_main_loss': train_main_loss,
-            'train_aux_loss': train_aux_loss,
             'val_loss': val_loss,
-            'val_metrics': val_metrics,
+            'val_metrics': clean_val_metrics,
             'lr': scheduler.get_last_lr()[0],
             'image_size': args.image_size
         }
+        
+        if args.use_multi_task:
+            log_data['loss_breakdown'] = loss_dict
+        else:
+            log_data['train_main_loss'] = train_main_loss
+            log_data['train_aux_loss'] = train_aux_loss
         
         log_file = log_dir / 'training_log.json'
         if log_file.exists():

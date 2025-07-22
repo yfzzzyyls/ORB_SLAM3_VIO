@@ -89,6 +89,7 @@ def custom_collate_fn(batch):
     gaze_y_list = []
     valid_mask_list = []
     gt_depth_at_gaze_list = []
+    depth_patch_stats_list = []
     
     # Apply augmentation and collect samples
     augmentation = GazeAwareAugmentation()
@@ -100,6 +101,7 @@ def custom_collate_fn(batch):
         gaze_x = sample['gaze']['x']
         gaze_y = sample['gaze']['y']
         gt_depth_at_gaze = sample['gt_depth_at_gaze']
+        depth_patch_stats = sample.get('depth_patch_stats', None)
         
         # Apply augmentation
         # Get image size from the RGB tensor
@@ -116,6 +118,10 @@ def custom_collate_fn(batch):
             gaze_y_list.append(gaze_y)
             valid_mask_list.append(valid_mask)
             gt_depth_at_gaze_list.append(gt_depth_at_gaze)
+            
+            # Note: depth_patch_stats are not augmented since they're ground truth
+            # In a more sophisticated implementation, we might recompute stats after augmentation
+            depth_patch_stats_list.append(depth_patch_stats)
     
     if len(rgb_list) == 0:
         return None
@@ -129,6 +135,23 @@ def custom_collate_fn(batch):
         'gaze_y': torch.tensor(gaze_y_list, dtype=torch.float32),
         'gt_depth_at_gaze': torch.tensor(gt_depth_at_gaze_list, dtype=torch.float32).unsqueeze(1)
     }
+    
+    # Add depth patch statistics if available
+    if all(stats is not None for stats in depth_patch_stats_list):
+        # Convert statistics to tensors
+        stats_dict = {}
+        stat_keys = depth_patch_stats_list[0].keys()
+        
+        for key in stat_keys:
+            if key != 'depth_bin':  # Skip categorical for now
+                values = [stats[key] for stats in depth_patch_stats_list]
+                stats_dict[f'gt_{key}'] = torch.tensor(values, dtype=torch.float32)
+        
+        # Handle depth bin separately (categorical)
+        depth_bins = [stats['depth_bin'] for stats in depth_patch_stats_list]
+        stats_dict['gt_depth_bin'] = torch.tensor(depth_bins, dtype=torch.long)
+        
+        batch_dict.update(stats_dict)
     
     return batch_dict
 

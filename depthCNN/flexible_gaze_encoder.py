@@ -7,7 +7,7 @@ Based on the proven lightweight_gaze_encoder.py but with flexible resolution sup
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 
 
 class FlexibleGazeEncoder(nn.Module):
@@ -153,6 +153,7 @@ class FlexibleGazeEncoder(nn.Module):
 class FlexibleGazeOnlyDepth(nn.Module):
     """
     Complete flexible model for gaze-only depth prediction supporting various image sizes.
+    Now with multi-task learning capabilities.
     """
     
     def __init__(
@@ -163,7 +164,8 @@ class FlexibleGazeOnlyDepth(nn.Module):
         image_size: int = 88,
         max_depth: float = 10.0,
         min_depth: float = 0.1,
-        use_multi_scale_supervision: bool = True
+        use_multi_scale_supervision: bool = True,
+        use_multi_task: bool = False
     ):
         """
         Args:
@@ -174,6 +176,7 @@ class FlexibleGazeOnlyDepth(nn.Module):
             max_depth: Maximum depth value
             min_depth: Minimum depth value
             use_multi_scale_supervision: Whether to use auxiliary losses
+            use_multi_task: Whether to use multi-task learning with patch statistics
         """
         super().__init__()
         
@@ -182,6 +185,7 @@ class FlexibleGazeOnlyDepth(nn.Module):
         self.max_depth = max_depth
         self.min_depth = min_depth
         self.use_multi_scale_supervision = use_multi_scale_supervision
+        self.use_multi_task = use_multi_task
         
         # Flexible encoder
         self.encoder = FlexibleGazeEncoder(
@@ -219,7 +223,52 @@ class FlexibleGazeOnlyDepth(nn.Module):
             nn.Linear(32, 1)
         )
         
-        # Auxiliary predictors (simpler)
+        # Multi-task prediction heads
+        if use_multi_task:
+            # Shared feature processing for auxiliary tasks
+            self.aux_feature_processor = nn.Sequential(
+                nn.Linear(total_feature_dim, 64),
+                nn.LayerNorm(64),
+                nn.ReLU(inplace=True),
+                nn.Dropout(0.1)
+            )
+            
+            # Mean depth predictor
+            self.mean_predictor = nn.Sequential(
+                nn.Linear(64, 32),
+                nn.ReLU(inplace=True),
+                nn.Linear(32, 1)
+            )
+            
+            # Std depth predictor
+            self.std_predictor = nn.Sequential(
+                nn.Linear(64, 32),
+                nn.ReLU(inplace=True),
+                nn.Linear(32, 1)
+            )
+            
+            # Gradient magnitude predictor
+            self.gradient_predictor = nn.Sequential(
+                nn.Linear(64, 32),
+                nn.ReLU(inplace=True),
+                nn.Linear(32, 1)
+            )
+            
+            # Edge score predictor (binary classification)
+            self.edge_predictor = nn.Sequential(
+                nn.Linear(64, 32),
+                nn.ReLU(inplace=True),
+                nn.Linear(32, 1)
+            )
+            
+            # Depth bin classifier (5 classes: 0-2m, 2-4m, 4-6m, 6-8m, 8m+)
+            self.depth_bin_predictor = nn.Sequential(
+                nn.Linear(64, 32),
+                nn.ReLU(inplace=True),
+                nn.Linear(32, 5)
+            )
+        
+        # Auxiliary predictors for multi-scale supervision (simpler)
         if use_multi_scale_supervision:
             self.aux_predictors = nn.ModuleList([
                 nn.Sequential(
@@ -242,7 +291,34 @@ class FlexibleGazeOnlyDepth(nn.Module):
             init_bias = torch.log(torch.tensor(2.0 / self.max_depth))
             nn.init.constant_(output_layer.bias, init_bias.item())
             
-            # Auxiliary predictors
+            # Multi-task predictors
+            if self.use_multi_task:
+                # Mean predictor - initialize to predict around 2m
+                output_layer = self.mean_predictor[-1]
+                nn.init.normal_(output_layer.weight, mean=0, std=0.01)
+                nn.init.constant_(output_layer.bias, init_bias.item())
+                
+                # Std predictor - initialize to predict small std
+                output_layer = self.std_predictor[-1]
+                nn.init.normal_(output_layer.weight, mean=0, std=0.01)
+                nn.init.constant_(output_layer.bias, -2.0)  # sigmoid(-2) ≈ 0.12
+                
+                # Gradient predictor - initialize to predict small gradients
+                output_layer = self.gradient_predictor[-1]
+                nn.init.normal_(output_layer.weight, mean=0, std=0.01)
+                nn.init.constant_(output_layer.bias, -2.0)
+                
+                # Edge predictor - initialize to predict non-edge
+                output_layer = self.edge_predictor[-1]
+                nn.init.normal_(output_layer.weight, mean=0, std=0.01)
+                nn.init.constant_(output_layer.bias, -2.0)  # sigmoid(-2) ≈ 0.12
+                
+                # Depth bin predictor - no special initialization needed
+                output_layer = self.depth_bin_predictor[-1]
+                nn.init.normal_(output_layer.weight, mean=0, std=0.01)
+                nn.init.constant_(output_layer.bias, 0.0)
+            
+            # Auxiliary predictors for multi-scale supervision
             if hasattr(self, 'aux_predictors'):
                 for aux_pred in self.aux_predictors:
                     output_layer = aux_pred[-1]
@@ -291,7 +367,7 @@ class FlexibleGazeOnlyDepth(nn.Module):
             gaze_y: [B] gaze y coordinates
             
         Returns:
-            Dictionary with 'depth' and optionally 'aux_depths'
+            Dictionary with 'depth' and optionally 'aux_depths' and multi-task predictions
         """
         # Encode image
         features = self.encoder(rgb)
@@ -321,7 +397,36 @@ class FlexibleGazeOnlyDepth(nn.Module):
         
         outputs = {'depth': depth}
         
-        # Auxiliary predictions
+        # Multi-task predictions
+        if self.use_multi_task and self.training:
+            # Process features for auxiliary tasks
+            aux_features = self.aux_feature_processor(combined_features)
+            
+            # Mean depth prediction
+            mean_logit = self.mean_predictor(aux_features)
+            pred_mean = torch.sigmoid(mean_logit) * self.max_depth
+            outputs['pred_mean'] = torch.clamp(pred_mean, min=self.min_depth, max=self.max_depth)
+            
+            # Std depth prediction (ensure positive)
+            std_logit = self.std_predictor(aux_features)
+            pred_std = torch.sigmoid(std_logit) * 2.0  # Max std of 2m
+            outputs['pred_std'] = pred_std
+            
+            # Gradient magnitude prediction
+            grad_logit = self.gradient_predictor(aux_features)
+            pred_gradient = torch.sigmoid(grad_logit) * 1.0  # Max gradient of 1.0
+            outputs['pred_gradient'] = pred_gradient
+            
+            # Edge score prediction
+            edge_logit = self.edge_predictor(aux_features)
+            pred_edge = torch.sigmoid(edge_logit)  # Probability of being an edge
+            outputs['pred_edge'] = pred_edge
+            
+            # Depth bin classification
+            bin_logits = self.depth_bin_predictor(aux_features)
+            outputs['pred_depth_bin'] = bin_logits  # Raw logits for cross-entropy loss
+        
+        # Auxiliary predictions for multi-scale supervision
         if self.use_multi_scale_supervision and self.training:
             aux_depths = []
             # Use features from scales 2 and 3 (skip scale 1)
@@ -342,49 +447,171 @@ class FlexibleGazeOnlyDepth(nn.Module):
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
 
+class MultiTaskGazeLoss(nn.Module):
+    """Multi-task loss for gaze-based depth prediction with auxiliary patch statistics."""
+    
+    def __init__(
+        self,
+        alpha: float = 0.85,
+        task_weights: Optional[Dict[str, float]] = None
+    ):
+        """
+        Args:
+            alpha: Weight for scale-invariant term in SI-log loss
+            task_weights: Weights for different tasks
+        """
+        super().__init__()
+        self.alpha = alpha
+        
+        # Default task weights
+        self.task_weights = task_weights or {
+            'depth': 1.0,      # Main task
+            'mean': 0.1,       # Auxiliary tasks
+            'std': 0.1,
+            'gradient': 0.05,
+            'edge': 0.05,
+            'depth_bin': 0.1,
+            'aux_depths': 0.1  # Multi-scale supervision
+        }
+        
+        # Individual loss functions
+        self.si_loss = nn.MSELoss(reduction='none')  # Will implement SI-log manually
+        self.mse_loss = nn.MSELoss()
+        self.l1_loss = nn.L1Loss()
+        self.bce_loss = nn.BCELoss()
+        self.ce_loss = nn.CrossEntropyLoss()
+    
+    def compute_si_log_loss(self, pred, target):
+        """Compute scale-invariant logarithmic loss."""
+        # Avoid log(0)
+        pred = torch.clamp(pred, min=1e-6)
+        target = torch.clamp(target, min=1e-6)
+        
+        # Log difference
+        log_diff = torch.log(pred) - torch.log(target)
+        
+        # Scale-invariant loss
+        loss = torch.mean(log_diff ** 2) - self.alpha * (torch.mean(log_diff) ** 2)
+        
+        return loss
+    
+    def forward(self, outputs: Dict[str, torch.Tensor], batch: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        """
+        Compute multi-task loss.
+        
+        Args:
+            outputs: Model predictions
+            batch: Batch data including ground truth
+            
+        Returns:
+            total_loss: Weighted sum of all losses
+            loss_dict: Dictionary of individual losses for logging
+        """
+        losses = {}
+        
+        # Main depth loss
+        pred_depth = outputs['depth']
+        gt_depth = batch['gt_depth_at_gaze'].to(pred_depth.device)
+        losses['depth'] = self.compute_si_log_loss(pred_depth, gt_depth)
+        
+        # Multi-task losses (only if model predicts them)
+        if 'pred_mean' in outputs and 'gt_mean' in batch:
+            # Mean depth loss - ensure tensors are on same device
+            gt_mean = batch['gt_mean'].to(outputs['pred_mean'].device)
+            losses['mean'] = self.l1_loss(outputs['pred_mean'], gt_mean.unsqueeze(1))
+            
+        if 'pred_std' in outputs and 'gt_std' in batch:
+            # Std depth loss - ensure tensors are on same device
+            gt_std = batch['gt_std'].to(outputs['pred_std'].device)
+            losses['std'] = self.l1_loss(outputs['pred_std'], gt_std.unsqueeze(1))
+            
+        if 'pred_gradient' in outputs and 'gt_grad_magnitude' in batch:
+            # Gradient magnitude loss - ensure tensors are on same device
+            gt_grad = batch['gt_grad_magnitude'].to(outputs['pred_gradient'].device)
+            losses['gradient'] = self.l1_loss(outputs['pred_gradient'], gt_grad.unsqueeze(1))
+            
+        if 'pred_edge' in outputs and 'gt_edge_score' in batch:
+            # Edge detection loss (treat as binary classification)
+            # Threshold edge score to create binary labels
+            edge_threshold = 0.1
+            gt_edge_score = batch['gt_edge_score'].to(outputs['pred_edge'].device)
+            gt_edges = (gt_edge_score > edge_threshold).float().unsqueeze(1)
+            losses['edge'] = self.bce_loss(outputs['pred_edge'], gt_edges)
+            
+        if 'pred_depth_bin' in outputs and 'gt_depth_bin' in batch:
+            # Depth bin classification loss - ensure tensors are on same device
+            gt_depth_bin = batch['gt_depth_bin'].to(outputs['pred_depth_bin'].device)
+            losses['depth_bin'] = self.ce_loss(outputs['pred_depth_bin'], gt_depth_bin)
+        
+        # Multi-scale supervision losses
+        if 'aux_depths' in outputs:
+            aux_loss = 0
+            for i, aux_depth in enumerate(outputs['aux_depths']):
+                aux_loss += self.compute_si_log_loss(aux_depth, gt_depth)
+            losses['aux_depths'] = aux_loss / len(outputs['aux_depths'])
+        
+        # Weighted sum
+        total_loss = sum(losses[k] * self.task_weights.get(k, 0) for k in losses)
+        
+        return total_loss, losses
+
+
 if __name__ == "__main__":
     # Test the flexible models
     print("Testing Flexible Gaze Encoder...")
     
-    # Test different image sizes
-    image_sizes = [88, 128, 176, 256]
+    # Test multi-task model
+    print("\nTesting multi-task model:")
+    model = FlexibleGazeOnlyDepth(
+        num_encoder_levels=3,
+        base_channels=32,
+        gaze_feature_dim=64,
+        image_size=352,
+        use_multi_task=True
+    )
     
-    for img_size in image_sizes:
-        print(f"\nTesting with image size {img_size}x{img_size}:")
-        
+    print(f"  Total parameters: {model.get_num_params():,}")
+    
+    # Count parameters by component
+    encoder_params = sum(p.numel() for p in model.encoder.parameters())
+    depth_params = sum(p.numel() for p in model.depth_predictor.parameters())
+    multitask_params = 0
+    if model.use_multi_task:
+        multitask_params += sum(p.numel() for p in model.aux_feature_processor.parameters())
+        multitask_params += sum(p.numel() for p in model.mean_predictor.parameters())
+        multitask_params += sum(p.numel() for p in model.std_predictor.parameters())
+        multitask_params += sum(p.numel() for p in model.gradient_predictor.parameters())
+        multitask_params += sum(p.numel() for p in model.edge_predictor.parameters())
+        multitask_params += sum(p.numel() for p in model.depth_bin_predictor.parameters())
+    
+    print(f"  Encoder: {encoder_params:,} params")
+    print(f"  Depth predictor: {depth_params:,} params")
+    print(f"  Multi-task heads: {multitask_params:,} params")
+    print(f"  Overhead for multi-task: {multitask_params / model.get_num_params() * 100:.1f}%")
+    
+    # Test forward pass
+    batch_size = 4
+    rgb = torch.randn(batch_size, 3, 352, 352)
+    gaze_x = torch.randint(0, 352, (batch_size,)).float()
+    gaze_y = torch.randint(0, 352, (batch_size,)).float()
+    
+    model.train()  # Enable training mode to get all outputs
+    outputs = model(rgb, gaze_x, gaze_y)
+    
+    print("\n  Model outputs:")
+    for key, value in outputs.items():
+        if isinstance(value, list):
+            print(f"    {key}: {len(value)} items, shape {value[0].shape}")
+        else:
+            print(f"    {key}: shape {value.shape}")
+    
+    # Test different image sizes
+    print("\nTesting different image sizes:")
+    for img_size in [88, 176, 352]:
         model = FlexibleGazeOnlyDepth(
             num_encoder_levels=3,
             base_channels=32,
-            gaze_feature_dim=64,
-            image_size=img_size
+            image_size=img_size,
+            use_multi_task=False
         )
-        
-        print(f"  Parameters: {model.get_num_params():,}")
-        
-        # Test forward pass
-        batch_size = 4
-        rgb = torch.randn(batch_size, 3, img_size, img_size)
-        gaze_x = torch.randint(0, img_size, (batch_size,)).float()
-        gaze_y = torch.randint(0, img_size, (batch_size,)).float()
-        
-        outputs = model(rgb, gaze_x, gaze_y)
-        print(f"  Output depth shape: {outputs['depth'].shape}")
-        print(f"  Depth range: [{outputs['depth'].min():.3f}, {outputs['depth'].max():.3f}]")
-        
-        # Calculate output feature map sizes
-        feat_sizes = []
-        size = img_size
-        for i in range(3):
-            size = size // 2
-            feat_sizes.append(size)
-        print(f"  Feature map sizes: {feat_sizes}")
-    
-    # Compare model sizes
-    print("\nModel size comparison:")
-    for levels in [2, 3]:
-        model = FlexibleGazeOnlyDepth(
-            num_encoder_levels=levels,
-            base_channels=32,
-            image_size=88
-        )
-        print(f"  {levels}-level model: {model.get_num_params():,} parameters")
+        print(f"  {img_size}x{img_size}: {model.get_num_params():,} parameters")
