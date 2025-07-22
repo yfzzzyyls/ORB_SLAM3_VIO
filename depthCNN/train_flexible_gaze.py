@@ -84,6 +84,167 @@ def train_epoch_multitask(model, dataloader, optimizer, loss_fn, device, logger)
     return avg_loss, avg_task_losses
 
 
+def train_epoch_dual(model, dataloader, optimizer, loss_fn, device, logger):
+    """Train for one epoch with dual-resolution model."""
+    model.train()
+    
+    total_loss = 0
+    total_main_loss = 0
+    total_aux_loss = 0
+    num_samples = 0
+    
+    pbar = tqdm(dataloader, desc='Training')
+    for batch in pbar:
+        if batch is None:
+            continue
+        
+        # Get data
+        context_rgb = batch['rgb'].to(device)
+        patch_rgb = batch['patch_rgb'].to(device)
+        gaze_x = batch['gaze_x'].to(device)
+        gaze_y = batch['gaze_y'].to(device)
+        gt_depth = batch['gt_depth_at_gaze'].to(device)
+        
+        batch_size = context_rgb.size(0)
+        
+        # Forward pass
+        outputs = model(context_rgb, patch_rgb, gaze_x, gaze_y)
+        pred_depth = outputs['depth']
+        
+        # Compute main loss
+        main_loss = loss_fn(pred_depth, gt_depth)
+        
+        # Compute auxiliary losses if available
+        aux_loss = 0
+        if 'aux_depths' in outputs:
+            for aux_depth in outputs['aux_depths']:
+                aux_loss += loss_fn(aux_depth, gt_depth)
+            aux_loss = aux_loss / len(outputs['aux_depths'])
+            
+            # Total loss with auxiliary weight
+            aux_weight = 0.2
+            loss = main_loss + aux_weight * aux_loss
+        else:
+            loss = main_loss
+        
+        # Backward pass
+        optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        optimizer.step()
+        
+        # Update stats
+        loss_value = loss.item()
+        total_loss += loss_value * batch_size
+        total_main_loss += main_loss.item() * batch_size
+        if aux_loss != 0:
+            total_aux_loss += aux_loss.item() * batch_size
+        num_samples += batch_size
+        
+        # Update progress bar
+        pbar.set_postfix({
+            'loss': f'{loss_value:.4f}',
+            'main': f'{main_loss.item():.4f}'
+        })
+    
+    avg_loss = total_loss / num_samples if num_samples > 0 else 0
+    avg_main_loss = total_main_loss / num_samples if num_samples > 0 else 0
+    avg_aux_loss = total_aux_loss / num_samples if num_samples > 0 else 0
+    
+    return avg_loss, avg_main_loss, avg_aux_loss
+
+
+def validate_dual(model, dataloader, loss_fn, device, logger):
+    """Validate the dual-resolution model."""
+    model.eval()
+    
+    total_loss = 0
+    num_samples = 0
+    
+    # Metrics storage
+    all_errors = []
+    all_rel_errors = []
+    all_sq_rel_errors = []
+    all_rmse = []
+    all_rmse_log = []
+    all_a1 = []
+    all_a2 = []
+    all_a3 = []
+    
+    pbar = tqdm(dataloader, desc='Validation')
+    with torch.no_grad():
+        for batch in pbar:
+            if batch is None:
+                continue
+            
+            # Get data
+            context_rgb = batch['rgb'].to(device)
+            patch_rgb = batch['patch_rgb'].to(device)
+            gaze_x = batch['gaze_x'].to(device)
+            gaze_y = batch['gaze_y'].to(device)
+            gt_depth = batch['gt_depth_at_gaze'].to(device)
+            
+            batch_size = context_rgb.size(0)
+            
+            # Forward pass
+            outputs = model(context_rgb, patch_rgb, gaze_x, gaze_y)
+            pred_depth = outputs['depth']
+            
+            # Compute loss
+            loss = loss_fn(pred_depth, gt_depth)
+            total_loss += loss.item() * batch_size
+            num_samples += batch_size
+            
+            # Compute metrics
+            for i in range(pred_depth.shape[0]):
+                pred = pred_depth[i].item()
+                gt = gt_depth[i].item()
+                
+                if gt > 0:  # Valid depth
+                    # Absolute error
+                    abs_err = abs(pred - gt)
+                    all_errors.append(abs_err)
+                    
+                    # Relative error
+                    rel_err = abs_err / gt
+                    all_rel_errors.append(rel_err)
+                    
+                    # Squared relative error
+                    sq_rel_err = ((pred - gt) ** 2) / gt
+                    all_sq_rel_errors.append(sq_rel_err)
+                    
+                    # RMSE
+                    all_rmse.append((pred - gt) ** 2)
+                    
+                    # RMSE log
+                    all_rmse_log.append((np.log(pred) - np.log(gt)) ** 2)
+                    
+                    # Threshold accuracy
+                    ratio = max(pred / gt, gt / pred)
+                    all_a1.append(ratio < 1.25)
+                    all_a2.append(ratio < 1.25 ** 2)
+                    all_a3.append(ratio < 1.25 ** 3)
+            
+            # Update progress bar
+            pbar.set_postfix({'loss': f'{loss.item():.4f}'})
+    
+    # Compute average metrics
+    metrics = {}
+    if len(all_errors) > 0:
+        metrics['mae'] = np.mean(all_errors)
+        metrics['abs_rel'] = np.mean(all_rel_errors)
+        metrics['sq_rel'] = np.mean(all_sq_rel_errors)
+        metrics['rmse'] = np.sqrt(np.mean(all_rmse))
+        metrics['rmse_log'] = np.sqrt(np.mean(all_rmse_log))
+        metrics['a1'] = np.mean(all_a1)
+        metrics['a2'] = np.mean(all_a2)
+        metrics['a3'] = np.mean(all_a3)
+    
+    avg_loss = total_loss / num_samples if num_samples > 0 else 0
+    
+    return avg_loss, metrics
+
+
 def validate_multitask(model, dataloader, loss_fn, device, logger):
     """Validate the model with multi-task outputs."""
     model.eval()
@@ -217,6 +378,14 @@ def main():
     parser.add_argument('--use-multi-task', action='store_true',
                         help='Use multi-task learning with patch statistics')
     
+    # Dual-resolution options
+    parser.add_argument('--use-dual-resolution', action='store_true',
+                        help='Use dual-resolution model with high-res patch')
+    parser.add_argument('--patch-size', type=int, default=96,
+                        help='Size of high-res patch (default: 96)')
+    parser.add_argument('--patch-channels', type=int, default=48,
+                        help='Base channels for patch encoder (default: 48)')
+    
     # Training parameters
     parser.add_argument('--epochs', type=int, default=30,
                         help='Number of training epochs')
@@ -269,14 +438,18 @@ def main():
         data_root=args.data_root,
         split='train',
         target_size=args.image_size,
-        transform=None
+        transform=None,
+        use_high_res_patch=args.use_dual_resolution,
+        patch_size=args.patch_size
     )
     
     val_dataset = FlexibleResolutionDataset(
         data_root=args.data_root,
         split='val',
         target_size=args.image_size,
-        transform=None
+        transform=None,
+        use_high_res_patch=args.use_dual_resolution,
+        patch_size=args.patch_size
     )
     
     logger.info(f"Train dataset: {len(train_dataset)} samples")
@@ -303,19 +476,39 @@ def main():
     )
     
     # Create model
-    logger.info(f"Creating flexible model for {args.image_size}×{args.image_size} images...")
-    logger.info(f"Multi-task learning: {'Enabled' if args.use_multi_task else 'Disabled'}")
-    
-    model = FlexibleGazeOnlyDepth(
-        num_encoder_levels=args.encoder_levels,
-        base_channels=args.base_channels,
-        gaze_feature_dim=args.gaze_feature_dim,
-        image_size=args.image_size,
-        max_depth=args.max_depth,
-        min_depth=args.min_depth,
-        use_multi_scale_supervision=args.multi_scale_supervision,
-        use_multi_task=args.use_multi_task
-    )
+    if args.use_dual_resolution:
+        logger.info(f"Creating dual-resolution model: {args.image_size}×{args.image_size} context + {args.patch_size}×{args.patch_size} patch")
+        
+        from flexible_gaze_encoder import DualResolutionGazeDepth
+        
+        model = DualResolutionGazeDepth(
+            context_size=args.image_size,
+            context_levels=args.encoder_levels,
+            context_channels=args.base_channels,
+            patch_size=args.patch_size,
+            patch_levels=args.encoder_levels,
+            patch_channels=args.patch_channels,
+            max_depth=args.max_depth,
+            min_depth=args.min_depth,
+            context_feature_dim=args.gaze_feature_dim,
+            patch_feature_dim=192,  # Fixed for balanced approach
+            use_attention_fusion=True,
+            use_multi_scale_supervision=args.multi_scale_supervision
+        )
+    else:
+        logger.info(f"Creating flexible model for {args.image_size}×{args.image_size} images...")
+        logger.info(f"Multi-task learning: {'Enabled' if args.use_multi_task else 'Disabled'}")
+        
+        model = FlexibleGazeOnlyDepth(
+            num_encoder_levels=args.encoder_levels,
+            base_channels=args.base_channels,
+            gaze_feature_dim=args.gaze_feature_dim,
+            image_size=args.image_size,
+            max_depth=args.max_depth,
+            min_depth=args.min_depth,
+            use_multi_scale_supervision=args.multi_scale_supervision,
+            use_multi_task=args.use_multi_task
+        )
     
     # Move model to device
     model = model.to(device)
@@ -333,17 +526,38 @@ def main():
     logger.info(f"Model parameters: {num_params:,} ({num_params/1e6:.2f}M)")
     
     # Log architecture details
-    if hasattr(model, 'module'):
-        encoder_params = sum(p.numel() for p in model.module.encoder.parameters())
-        predictor_params = sum(p.numel() for p in model.module.depth_predictor.parameters())
+    if args.use_dual_resolution:
+        # For dual-resolution model
+        if hasattr(model, 'module'):
+            context_params = sum(p.numel() for p in model.module.context_encoder.parameters())
+            patch_params = sum(p.numel() for p in model.module.patch_encoder.parameters())
+            fusion_params = sum(p.numel() for p in model.module.fusion.parameters())
+            predictor_params = sum(p.numel() for p in model.module.depth_predictor.parameters())
+        else:
+            context_params = sum(p.numel() for p in model.context_encoder.parameters())
+            patch_params = sum(p.numel() for p in model.patch_encoder.parameters())
+            fusion_params = sum(p.numel() for p in model.fusion.parameters())
+            predictor_params = sum(p.numel() for p in model.depth_predictor.parameters())
+        
+        logger.info(f"Architecture breakdown:")
+        logger.info(f"  Context encoder: {context_params:,} params")
+        logger.info(f"  Patch encoder: {patch_params:,} params")
+        logger.info(f"  Feature fusion: {fusion_params:,} params")
+        logger.info(f"  Depth predictor: {predictor_params:,} params")
+        logger.info(f"  Total: {num_params:,} params")
     else:
-        encoder_params = sum(p.numel() for p in model.encoder.parameters())
-        predictor_params = sum(p.numel() for p in model.depth_predictor.parameters())
-    
-    logger.info(f"Architecture breakdown:")
-    logger.info(f"  Encoder: {encoder_params:,} params")
-    logger.info(f"  Predictor: {predictor_params:,} params")
-    logger.info(f"  Efficiency: {(1 - num_params/1234161)*100:.1f}% reduction vs RT-MonoDepth")
+        # For single-resolution model
+        if hasattr(model, 'module'):
+            encoder_params = sum(p.numel() for p in model.module.encoder.parameters())
+            predictor_params = sum(p.numel() for p in model.module.depth_predictor.parameters())
+        else:
+            encoder_params = sum(p.numel() for p in model.encoder.parameters())
+            predictor_params = sum(p.numel() for p in model.depth_predictor.parameters())
+        
+        logger.info(f"Architecture breakdown:")
+        logger.info(f"  Encoder: {encoder_params:,} params")
+        logger.info(f"  Predictor: {predictor_params:,} params")
+        logger.info(f"  Efficiency: {(1 - num_params/1234161)*100:.1f}% reduction vs RT-MonoDepth")
     
     # Calculate theoretical receptive field
     receptive_field = 7  # Initial conv
@@ -357,7 +571,10 @@ def main():
         logger.info("Using multi-task loss function")
     else:
         loss_fn = GazeDepthLoss(alpha=0.85, grad_weight=0.1, rel_weight=0.1)
-        logger.info("Using standard gaze depth loss")
+        if args.use_dual_resolution:
+            logger.info("Using standard gaze depth loss for dual-resolution model")
+        else:
+            logger.info("Using standard gaze depth loss")
     
     # Scale learning rate based on batch size
     base_batch_size = 32  # Base batch size for reference
@@ -419,7 +636,12 @@ def main():
         logger.info(f"Learning rate: {scheduler.get_last_lr()[0]:.6f}")
         
         # Train
-        if args.use_multi_task:
+        if args.use_dual_resolution:
+            train_loss, train_main_loss, train_aux_loss = train_epoch_dual(
+                model, train_loader, optimizer, loss_fn, device, logger
+            )
+            logger.info(f"Train Loss: {train_loss:.4f} (main: {train_main_loss:.4f}, aux: {train_aux_loss:.4f})")
+        elif args.use_multi_task:
             train_loss, loss_dict = train_epoch_multitask(
                 model, train_loader, optimizer, loss_fn, device, logger
             )
@@ -435,7 +657,11 @@ def main():
             logger.info(f"Train Loss: {train_loss:.4f} (main: {train_main_loss:.4f}, aux: {train_aux_loss:.4f})")
         
         # Validate
-        if args.use_multi_task:
+        if args.use_dual_resolution:
+            val_loss, val_metrics = validate_dual(
+                model, val_loader, loss_fn, device, logger
+            )
+        elif args.use_multi_task:
             val_loss, val_metrics = validate_multitask(
                 model, val_loader, loss_fn, device, logger
             )

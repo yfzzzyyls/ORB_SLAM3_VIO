@@ -43,44 +43,82 @@ python extract_dataset.py  # All defaults configured for full 30Hz extraction
 
 ### 3. Train Model - All Approaches
 
-#### Approach 1: Full Resolution Dense Depth (1408×1408)
+#### Approach 1: Original RT-MonoDepth (Dense Depth Prediction)
+
+##### Full Resolution (1408×1408)
 ```bash
-# Single GPU - Original RT-MonoDepth on full resolution
+# Single GPU
 python train.py \
     --data-root ./processed_data \
     --epochs 20 \
     --batch-size 4 \
     --lr 1e-4 \
-    --crop-size 1408
+    --crop-size 1408 \
+    --checkpoint-dir ./checkpoints/rtmonodepth_full_original \
+    --log-dir ./logs/rtmonodepth_full_original
 
-# Multi-GPU (automatically uses all available GPUs)
-python train.py \
+# Multi-GPU (2 GPUs example)
+CUDA_VISIBLE_DEVICES=0,1 python train.py \
     --data-root ./processed_data \
     --epochs 20 \
-    --batch-size 16 \
-    --lr 2e-4 \
-    --crop-size 1408
+    --batch-size 8 \
+    --lr 1.5e-4 \
+    --crop-size 1408 \
+    --checkpoint-dir ./checkpoints/rtmonodepth_full_original \
+    --log-dir ./logs/rtmonodepth_full_original
 ```
+**Model**: Original RT-MonoDepth-S with 1.23M parameters (858K encoder + 376K decoder)  
 **Results**: Dense depth map at 1408×1408, can evaluate at any pixel including gaze
 
-#### Approach 2: Low Resolution Dense Depth (88×88)
+##### Low Resolution (88×88)
 ```bash
-# Average pooling to 88×88, predict full depth map
+# Single GPU
 python train_lowres.py \
     --data-root ./processed_data \
     --lowres-scale 16 \
     --epochs 20 \
     --batch-size 32 \
-    --lr 2e-4
+    --lr 1e-4 \
+    --checkpoint-dir ./checkpoints/rtmonodepth_88_original \
+    --log-dir ./logs/rtmonodepth_88_original
 
-# Evaluate at gaze location from 88×88 depth map
-python evaluate_lowres.py \
-    --checkpoint ./checkpoints/lowres_16x/checkpoint_best.pth \
+# Multi-GPU (2 GPUs example)
+CUDA_VISIBLE_DEVICES=2,3 python train_lowres.py \
     --data-root ./processed_data \
     --lowres-scale 16 \
-    --save-results
+    --epochs 20 \
+    --batch-size 64 \
+    --lr 2e-4 \
+    --checkpoint-dir ./checkpoints/rtmonodepth_88_original \
+    --log-dir ./logs/rtmonodepth_88_original
 ```
-**Results**: 88×88 dense depth map, 3.58ms latency, 16.8% error at gaze
+**Model**: Same RT-MonoDepth-S architecture but trained on 88×88 images  
+**Results**: 88×88 dense depth map, faster training and inference
+
+##### Running Both Simultaneously on 4 GPUs
+```bash
+# Terminal 1: Full resolution on GPUs 0,1
+CUDA_VISIBLE_DEVICES=0,1 python train.py \
+    --data-root ./processed_data \
+    --epochs 20 \
+    --batch-size 8 \
+    --lr 1.5e-4 \
+    --crop-size 1408 \
+    --checkpoint-dir ./checkpoints/rtmonodepth_full_original \
+    --log-dir ./logs/rtmonodepth_full_original
+
+# Terminal 2: Low resolution on GPUs 2,3
+CUDA_VISIBLE_DEVICES=2,3 python train_lowres.py \
+    --data-root ./processed_data \
+    --lowres-scale 16 \
+    --epochs 20 \
+    --batch-size 64 \
+    --lr 2e-4 \
+    --checkpoint-dir ./checkpoints/rtmonodepth_88_original \
+    --log-dir ./logs/rtmonodepth_88_original
+```
+
+#### Approach 2: Gaze-Only Depth (Single Point Prediction)
 
 #### Approach 3: Lightweight Gaze-Only (RECOMMENDED)
 ```bash
@@ -107,78 +145,80 @@ python train_lightweight_gaze.py \
 #### Comparison Summary:
 | Approach | Parameters | Output | MAE at Gaze | Speed | Use Case |
 |----------|------------|---------|-------------|--------|----------|
-| Full Res Dense | 1.23M | 1408×1408 map | ~0.5m | 20-50ms | Need full depth map |
-| Low Res Dense | 1.23M | 88×88 map | ~0.5m | 3.58ms | Fast dense depth |
+| RT-MonoDepth Full | 1.23M | 1408×1408 map | TBD | 20-50ms | Need full depth map |
+| RT-MonoDepth 88×88 | 1.23M | 88×88 map | TBD | 3-5ms | Fast dense depth |
 | Gaze-Only Original | 1.41M | Single point | ~0.53m | 2-3ms | Baseline gaze depth |
 | **Lightweight Gaze** | **354K** | **Single point** | **0.41m** | **2-3ms** | **Best for gaze** |
+| Multi-task Gaze | 377K | Single point | **0.394m** | 2-3ms | Improved accuracy |
+| Dual-Resolution | 1.13M | Single point | ~0.363m | ~15ms | Maximum accuracy |
 
 ### 4. Evaluate
 
-#### Lightweight Gaze-Only Model (RECOMMENDED)
+#### Universal Evaluation Script (NEW - For All Model Types)
 ```bash
-# 3-level encoder (354K params) - Best accuracy
-python evaluate_gaze_only.py \
+# Evaluate any model with automatic configuration detection
+python evaluate_flexible.py \
+    --checkpoint <path_to_checkpoint> \
+    --image-size <input_size> \
+    --data-root ./processed_data \
+    --save-results
+
+# Examples:
+
+# 88×88 Baseline Model
+python evaluate_flexible.py \
     --checkpoint ./checkpoints/lightweight_gaze/level3_ch32/checkpoint_best.pth \
+    --image-size 88 \
     --data-root ./processed_data \
-    --model lightweight \
-    --encoder-levels 3 \
-    --base-channels 32 \
-    --batch-size 64 \
+    --save-results
+
+# 88×88 Multi-task Model
+python evaluate_flexible.py \
+    --checkpoint ./checkpoints/multitask_88/size88_level3_ch32/checkpoint_best.pth \
+    --image-size 88 \
+    --data-root ./processed_data \
+    --save-results
+
+# 352×352 Model
+python evaluate_flexible.py \
+    --checkpoint ./checkpoints/flexible_gaze_352/size352_level4_ch32/checkpoint_best.pth \
+    --image-size 352 \
+    --data-root ./processed_data \
+    --save-results
+
+# Dual-Resolution Model (88×88 context + 96×96 patch)
+python evaluate_flexible.py \
+    --checkpoint ./checkpoints/dual_resolution/size88_level3_ch32/checkpoint_best.pth \
+    --image-size 88 \
+    --model-type dual \
+    --data-root ./processed_data \
     --save-results \
-    --visualize
-
-# 2-level encoder (114K params) - Ultra-lightweight
-python evaluate_gaze_only.py \
-    --checkpoint ./checkpoints/lightweight_gaze/level2_ch32/checkpoint_best.pth \
-    --data-root ./processed_data \
-    --model lightweight \
-    --encoder-levels 2 \
-    --base-channels 32 \
-    --batch-size 128 \
-    --save-results
+    --batch-size 32
 ```
 
-#### Dense Low-Res Model (88×88)
-```bash
-# Evaluate dense model with gaze-specific metrics
-python evaluate_lowres.py \
-    --checkpoint ./checkpoints/lowres_16x/checkpoint_best.pth \
-    --data-root ./processed_data \
-    --lowres-scale 16 \
-    --batch-size 64 \
-    --save-results
-```
+The evaluation script automatically:
+- Detects model type from checkpoint path
+- Loads appropriate architecture
+- Computes comprehensive metrics (MAE, RMSE, abs_rel, threshold accuracies)
+- Measures inference timing and FPS
+- Saves results to JSON and predictions to NPZ
 
-#### Original Gaze-Only Model
-```bash
-python evaluate_gaze_only.py \
-    --checkpoint ./checkpoints/gaze_only/checkpoint_best.pth \
-    --data-root ./processed_data \
-    --model original \
-    --batch-size 64 \
-    --save-results
-```
 
-#### Full Resolution Evaluation
-```bash
-# Evaluate on test dataset (default)
-python evaluate.py \
-    --checkpoint checkpoints/best_model.pth \
-    --data-root ./processed_data \
-    --batch-size 16
-```
+#### Expected Results (Updated with Latest Models)
 
-#### Expected Results
+| Model | Params | Latency | MAE | RMSE | abs_rel | δ < 1.25 | FPS |
+|-------|--------|---------|-----|------|---------|----------|-----|
+| **88×88 Baseline** | 354K | 2.54ms | 0.420m | 0.600m | 0.188 | 76.5% | 393 |
+| **88×88 Multi-task** | 377K | 2.54ms | **0.394m** | 0.601m | **0.184** | **80.4%** | 394 |
+| **Dual-resolution** | 1.13M | ~15ms | ~0.363m* | TBD | TBD | TBD | ~60 |
+| Dense Low-Res | 914K | 2.43ms | 0.418m | 0.518m | - | 74.8% | - |
+| Original Gaze | 1.41M | ~2ms | ~0.53m | ~0.65m | - | ~75% | - |
 
-| Model | Params | Latency | MAE | RMSE | Max Error | δ < 1.25 |
-|-------|--------|---------|-----|------|-----------|----------|
-| **Lightweight (3-level)** | 354K | 0.62ms | 0.399m | 0.590m | 4.83m | 78.1% |
-| Dense Low-Res | 914K | 2.43ms | 0.418m | 0.518m | 1.23m | 74.8% |
-| Original Gaze | 1.41M | ~2ms | ~0.53m | ~0.65m | ~5m | ~75% |
+*Validation MAE from training
 
 The evaluation will report:
 - **Standard metrics**: MAE, RMSE, abs_rel, sq_rel, log_mae, δ accuracies
-- **Error statistics**: Median, std, min/max errors
+- **Error statistics**: Median, std, min/max errors, 95th percentile
 - **Latency**: Inference time per frame and FPS
 - **Training info**: Best validation metrics from checkpoint
 
@@ -239,6 +279,13 @@ cat logs/lowres_16x/training_log.json | jq '.[].val_metrics.abs_rel'
 ## Common Commands
 
 ```bash
+# Evaluate any trained model
+python evaluate_flexible.py \
+    --checkpoint <checkpoint_path> \
+    --image-size <size> \
+    --data-root ./processed_data \
+    --save-results
+
 # Test the downsampling pipeline
 python test_lowres_pipeline.py --data-root ./processed_data --visualize
 
@@ -246,10 +293,10 @@ python test_lowres_pipeline.py --data-root ./processed_data --visualize
 python lowres_dataset.py --data-root ./processed_data --scale-factor 16 --visualize
 
 # Resume training from checkpoint
-python train_lowres.py \
+python train_lightweight_gaze.py \
     --data-root ./processed_data \
-    --lowres-scale 16 \
-    --resume ./checkpoints/lowres_16x/checkpoint_latest.pth \
+    --encoder-levels 3 \
+    --resume ./checkpoints/lightweight_gaze/level3_ch32/checkpoint_latest.pth \
     --lr 1e-5
 ```
 
@@ -500,3 +547,68 @@ Based on the spatial precision increase, we expect:
 3. **Monitor memory**: Larger images need more GPU/CPU RAM
 4. **Gradual increases**: Try 176→352→704 if needed
 5. **Keep num_workers low**: Prevents memory issues with large images
+
+## Multi-Task Learning (Improved Performance)
+
+### Overview
+Multi-task learning forces the model to learn consistent features by predicting auxiliary patch statistics alongside the main depth prediction. This approach achieved **6.4% improvement** in MAE over the baseline.
+
+### Training Command
+```bash
+python train_flexible_gaze.py \
+    --data-root ./processed_data \
+    --image-size 88 \
+    --encoder-levels 3 \
+    --base-channels 32 \
+    --use-multi-task \
+    --batch-size 128 \
+    --lr 4e-4 \
+    --epochs 30 \
+    --checkpoint-dir ./checkpoints/multitask_88
+```
+
+### Architecture Details
+The multi-task model predicts:
+1. **Primary**: Depth at gaze location
+2. **Auxiliary**: Patch statistics from 16×16 region around gaze:
+   - Mean depth
+   - Standard deviation
+   - Gradient magnitude
+   - Edge score
+   - Depth bin classification (5 bins: 0-2m, 2-4m, 4-6m, 6-8m, 8m+)
+
+### Loss Function
+- **Total Loss** = depth_loss + 0.1×mean_loss + 0.1×std_loss + 0.05×gradient_loss + 0.05×edge_loss + 0.1×bin_loss
+- Forces feature consistency across related tasks
+
+## Dual-Resolution Architecture (Maximum Accuracy)
+
+### Overview
+Combines low-resolution context (88×88) with high-resolution patch (96×96) at gaze location for maximum accuracy. Achieves ~8.3% improvement over baseline but at 3× parameter cost.
+
+### Training Command
+```bash
+python train_flexible_gaze.py \
+    --data-root ./processed_data \
+    --image-size 88 \
+    --use-dual-resolution \
+    --patch-size 96 \
+    --patch-channels 32 \
+    --encoder-levels 3 \
+    --base-channels 32 \
+    --batch-size 64 \
+    --lr 2e-4 \
+    --epochs 50 \
+    --checkpoint-dir ./checkpoints/dual_resolution
+```
+
+### Architecture Components
+1. **Context Encoder**: Processes full 88×88 image for scene understanding
+2. **Patch Encoder**: Processes 96×96 high-res patch centered at gaze
+3. **Feature Fusion**: Attention-based fusion of context and patch features
+4. **Depth Predictor**: Final MLP for depth prediction
+
+### Key Benefits
+- **High-res details**: 96×96 patch provides fine-grained features at gaze
+- **Context awareness**: 88×88 image provides scene understanding
+- **Best of both**: Combines efficiency of low-res with accuracy of high-res

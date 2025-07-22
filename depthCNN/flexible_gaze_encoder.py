@@ -556,6 +556,215 @@ class MultiTaskGazeLoss(nn.Module):
         return total_loss, losses
 
 
+class DualResolutionGazeDepth(nn.Module):
+    """
+    Combines low-res context (88×88) with high-res patch (96×96) for accurate gaze depth.
+    This achieves high accuracy while maintaining efficiency.
+    """
+    
+    def __init__(
+        self,
+        # Context encoder parameters
+        context_size: int = 88,
+        context_levels: int = 3,
+        context_channels: int = 32,
+        
+        # Patch encoder parameters  
+        patch_size: int = 96,
+        patch_levels: int = 3,
+        patch_channels: int = 48,
+        
+        # Output parameters
+        max_depth: float = 10.0,
+        min_depth: float = 0.1,
+        
+        # Feature dimensions
+        context_feature_dim: int = 64,
+        patch_feature_dim: int = 192,
+        
+        # Options
+        use_attention_fusion: bool = True,
+        use_multi_scale_supervision: bool = True
+    ):
+        """Initialize dual-resolution model."""
+        super().__init__()
+        
+        # Import patch encoder
+        from lightweight_patch_encoder import LightweightPatchEncoder, FeatureFusionModule
+        
+        self.context_size = context_size
+        self.patch_size = patch_size
+        self.max_depth = max_depth
+        self.min_depth = min_depth
+        self.use_multi_scale_supervision = use_multi_scale_supervision
+        
+        # Context encoder - processes full 88×88 image
+        self.context_encoder = FlexibleGazeOnlyDepth(
+            num_encoder_levels=context_levels,
+            base_channels=context_channels,
+            gaze_feature_dim=context_feature_dim,
+            image_size=context_size,
+            max_depth=max_depth,
+            min_depth=min_depth,
+            use_multi_scale_supervision=False,  # We'll handle this separately
+            use_multi_task=False  # Simplify for now
+        )
+        
+        # Patch encoder - processes 96×96 high-res patch
+        self.patch_encoder = LightweightPatchEncoder(
+            num_levels=patch_levels,
+            base_channels=patch_channels,
+            output_dim=patch_feature_dim,
+            image_size=patch_size
+        )
+        
+        # Calculate total feature dimension
+        context_total_dim = context_levels * context_feature_dim  # 3 * 64 = 192
+        
+        # Feature fusion module
+        self.fusion = FeatureFusionModule(
+            context_dim=context_total_dim,
+            patch_dim=patch_feature_dim,
+            output_dim=384,
+            use_attention=use_attention_fusion
+        )
+        
+        # Final depth predictor
+        self.depth_predictor = nn.Sequential(
+            nn.Linear(384, 256),
+            nn.LayerNorm(256),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.1),
+            
+            nn.Linear(256, 128),
+            nn.LayerNorm(128),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.1),
+            
+            nn.Linear(128, 64),
+            nn.LayerNorm(64),
+            nn.ReLU(inplace=True),
+            
+            nn.Linear(64, 32),
+            nn.ReLU(inplace=True),
+            nn.Linear(32, 1)
+        )
+        
+        # Auxiliary predictors for multi-scale supervision
+        if use_multi_scale_supervision:
+            # Predict from context features alone (for auxiliary loss)
+            self.context_aux_predictor = nn.Sequential(
+                nn.Linear(context_total_dim, 64),
+                nn.ReLU(inplace=True),
+                nn.Linear(64, 1)
+            )
+            
+            # Predict from patch features alone (for auxiliary loss)
+            self.patch_aux_predictor = nn.Sequential(
+                nn.Linear(patch_feature_dim, 64),
+                nn.ReLU(inplace=True),
+                nn.Linear(64, 1)
+            )
+        
+        # Initialize depth output layers
+        self._init_depth_outputs()
+        
+    def _init_depth_outputs(self):
+        """Initialize depth prediction layers for reasonable outputs."""
+        with torch.no_grad():
+            # Initialize main predictor
+            output_layer = self.depth_predictor[-1]
+            nn.init.normal_(output_layer.weight, mean=0, std=0.01)
+            init_bias = torch.log(torch.tensor(2.0 / self.max_depth))
+            nn.init.constant_(output_layer.bias, init_bias.item())
+            
+            # Initialize auxiliary predictors
+            if hasattr(self, 'context_aux_predictor'):
+                output_layer = self.context_aux_predictor[-1]
+                nn.init.normal_(output_layer.weight, mean=0, std=0.01)
+                nn.init.constant_(output_layer.bias, init_bias.item())
+                
+            if hasattr(self, 'patch_aux_predictor'):
+                output_layer = self.patch_aux_predictor[-1]
+                nn.init.normal_(output_layer.weight, mean=0, std=0.01)
+                nn.init.constant_(output_layer.bias, init_bias.item())
+    
+    def forward(
+        self,
+        context_rgb: torch.Tensor,
+        patch_rgb: torch.Tensor,
+        gaze_x: torch.Tensor,
+        gaze_y: torch.Tensor
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Forward pass combining context and patch information.
+        
+        Args:
+            context_rgb: [B, 3, 88, 88] low-res full image
+            patch_rgb: [B, 3, 96, 96] high-res patch at gaze
+            gaze_x: [B] gaze x coordinate in context image
+            gaze_y: [B] gaze y coordinate in context image
+            
+        Returns:
+            Dictionary with 'depth' and optionally 'aux_depths'
+        """
+        # Get context features using gaze
+        context_outputs = self.context_encoder(context_rgb, gaze_x, gaze_y)
+        context_features = context_outputs['depth'].squeeze(1)  # Remove depth dimension
+        
+        # Actually, we need to get the features before final prediction
+        # Let's access the encoder directly
+        context_encoder_features = self.context_encoder.encoder(context_rgb)
+        
+        # Extract gaze features from each scale
+        context_gaze_features = []
+        for i, (feat, proj) in enumerate(zip(context_encoder_features, self.context_encoder.gaze_projections)):
+            scale_factor = 2 ** (i + 1)
+            scaled_gaze_x = gaze_x / scale_factor
+            scaled_gaze_y = gaze_y / scale_factor
+            
+            gaze_feat = self.context_encoder.extract_gaze_features(feat, scaled_gaze_x, scaled_gaze_y)
+            projected = proj(gaze_feat)
+            context_gaze_features.append(projected)
+        
+        # Concatenate context features
+        context_combined = torch.cat(context_gaze_features, dim=1)
+        
+        # Get patch features (centered at gaze, so extract from center)
+        patch_features = self.patch_encoder(patch_rgb)
+        
+        # Fuse context and patch features
+        fused_features = self.fusion(context_combined, patch_features)
+        
+        # Predict depth from fused features
+        depth_logit = self.depth_predictor(fused_features)
+        depth = torch.sigmoid(depth_logit) * self.max_depth
+        depth = torch.clamp(depth, min=self.min_depth, max=self.max_depth)
+        
+        outputs = {'depth': depth}
+        
+        # Auxiliary predictions for multi-scale supervision
+        if self.use_multi_scale_supervision and self.training:
+            # Context-only prediction
+            context_depth_logit = self.context_aux_predictor(context_combined)
+            context_depth = torch.sigmoid(context_depth_logit) * self.max_depth
+            context_depth = torch.clamp(context_depth, min=self.min_depth, max=self.max_depth)
+            
+            # Patch-only prediction
+            patch_depth_logit = self.patch_aux_predictor(patch_features)
+            patch_depth = torch.sigmoid(patch_depth_logit) * self.max_depth
+            patch_depth = torch.clamp(patch_depth, min=self.min_depth, max=self.max_depth)
+            
+            outputs['aux_depths'] = [context_depth, patch_depth]
+            outputs['aux_names'] = ['context_only', 'patch_only']
+        
+        return outputs
+    
+    def get_num_params(self) -> int:
+        """Get total number of trainable parameters."""
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+
 if __name__ == "__main__":
     # Test the flexible models
     print("Testing Flexible Gaze Encoder...")

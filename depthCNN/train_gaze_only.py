@@ -90,6 +90,8 @@ def custom_collate_fn(batch):
     valid_mask_list = []
     gt_depth_at_gaze_list = []
     depth_patch_stats_list = []
+    high_res_patch_list = []
+    patch_coords_list = []
     
     # Apply augmentation and collect samples
     augmentation = GazeAwareAugmentation()
@@ -102,6 +104,8 @@ def custom_collate_fn(batch):
         gaze_y = sample['gaze']['y']
         gt_depth_at_gaze = sample['gt_depth_at_gaze']
         depth_patch_stats = sample.get('depth_patch_stats', None)
+        high_res_patch = sample.get('high_res_patch', None)
+        patch_coords = sample.get('patch_coords', None)
         
         # Apply augmentation
         # Get image size from the RGB tensor
@@ -122,6 +126,11 @@ def custom_collate_fn(batch):
             # Note: depth_patch_stats are not augmented since they're ground truth
             # In a more sophisticated implementation, we might recompute stats after augmentation
             depth_patch_stats_list.append(depth_patch_stats)
+            
+            # Add high-res patch if available
+            if high_res_patch is not None:
+                high_res_patch_list.append(high_res_patch)
+                patch_coords_list.append(patch_coords)
     
     if len(rgb_list) == 0:
         return None
@@ -135,6 +144,11 @@ def custom_collate_fn(batch):
         'gaze_y': torch.tensor(gaze_y_list, dtype=torch.float32),
         'gt_depth_at_gaze': torch.tensor(gt_depth_at_gaze_list, dtype=torch.float32).unsqueeze(1)
     }
+    
+    # Add high-res patches if available
+    if len(high_res_patch_list) > 0:
+        batch_dict['patch_rgb'] = torch.stack(high_res_patch_list)
+        batch_dict['patch_coords'] = patch_coords_list
     
     # Add depth patch statistics if available
     if all(stats is not None for stats in depth_patch_stats_list):

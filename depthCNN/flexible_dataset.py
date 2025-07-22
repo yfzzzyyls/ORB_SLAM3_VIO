@@ -28,7 +28,9 @@ class FlexibleResolutionDataset(ProcessedADTDataset):
         data_root: str,
         split: str = 'train',
         target_size: int = 88,
-        transform=None
+        transform=None,
+        use_high_res_patch: bool = False,
+        patch_size: int = 96
     ):
         """
         Args:
@@ -36,16 +38,23 @@ class FlexibleResolutionDataset(ProcessedADTDataset):
             split: 'train', 'val', or 'test'
             target_size: Target image size (square images)
             transform: Optional transforms to apply
+            use_high_res_patch: Whether to extract high-res patch at gaze
+            patch_size: Size of the high-res patch (default 96)
         """
         super().__init__(data_root, split, transform)
         self.target_size = target_size
         self.original_size = 1408
         self.scale_factor = self.original_size / target_size
+        self.use_high_res_patch = use_high_res_patch
+        self.patch_size = patch_size
         
         print(f"Flexible resolution dataset initialized:")
         print(f"  Original size: {self.original_size}×{self.original_size}")
         print(f"  Target size: {target_size}×{target_size}")
         print(f"  Scale factor: {self.scale_factor:.2f}")
+        if use_high_res_patch:
+            print(f"  High-res patch: {patch_size}×{patch_size}")
+            print(f"  Patch coverage: {patch_size/self.original_size*100:.1f}% of original")
         
     def __getitem__(self, index):
         frame_info = self.frame_index[index]
@@ -147,7 +156,25 @@ class FlexibleResolutionDataset(ProcessedADTDataset):
                 rgb_resized, depth_resized, valid_mask_resized
             )
         
-        return {
+        # Extract high-res patch if requested
+        high_res_patch = None
+        patch_coords = None
+        if self.use_high_res_patch and gaze_info is not None:
+            # Load original resolution RGB for patch extraction
+            rgb_original = cv2.imread(str(rgb_path))
+            rgb_original = cv2.cvtColor(rgb_original, cv2.COLOR_BGR2RGB)
+            
+            # Extract patch centered at original gaze coordinates
+            high_res_patch, patch_coords = self.extract_gaze_patch(
+                rgb_original,
+                gaze_info['x_original'],
+                gaze_info['y_original']
+            )
+            
+            # Convert patch to tensor and normalize
+            high_res_patch = torch.from_numpy(high_res_patch).permute(2, 0, 1).float() / 255.0
+        
+        sample_dict = {
             'rgb': rgb_resized,
             'depth': depth_resized,
             'valid_mask': valid_mask_resized,
@@ -160,6 +187,13 @@ class FlexibleResolutionDataset(ProcessedADTDataset):
             'original_size': self.original_size,
             'target_size': self.target_size
         }
+        
+        # Add high-res patch data if available
+        if self.use_high_res_patch:
+            sample_dict['high_res_patch'] = high_res_patch
+            sample_dict['patch_coords'] = patch_coords
+            
+        return sample_dict
     
     def _extract_depth_patch_statistics(self, depth_map, gaze_x, gaze_y):
         """Extract statistics from a patch around the gaze point.
@@ -241,6 +275,60 @@ class FlexibleResolutionDataset(ProcessedADTDataset):
             if depth < threshold:
                 return i
         return len(bins) - 2  # Last bin
+    
+    def extract_gaze_patch(self, image: np.ndarray, gaze_x: float, gaze_y: float) -> Tuple[np.ndarray, Tuple[int, int]]:
+        """
+        Extract a high-resolution patch centered at gaze location.
+        
+        Args:
+            image: Original resolution image (1408×1408)
+            gaze_x: X coordinate in original image
+            gaze_y: Y coordinate in original image
+            
+        Returns:
+            patch: Extracted patch of size patch_size×patch_size
+            patch_coords: (x_start, y_start) coordinates of patch in original image
+        """
+        # Convert gaze coordinates to integers
+        gaze_x_int = int(round(gaze_x))
+        gaze_y_int = int(round(gaze_y))
+        
+        # Calculate patch boundaries
+        half_patch = self.patch_size // 2
+        
+        # Initial boundaries
+        x_start = gaze_x_int - half_patch
+        y_start = gaze_y_int - half_patch
+        x_end = x_start + self.patch_size
+        y_end = y_start + self.patch_size
+        
+        # Handle boundaries - shift patch to stay within image
+        if x_start < 0:
+            x_end -= x_start
+            x_start = 0
+        elif x_end > self.original_size:
+            x_start -= (x_end - self.original_size)
+            x_end = self.original_size
+            
+        if y_start < 0:
+            y_end -= y_start
+            y_start = 0
+        elif y_end > self.original_size:
+            y_start -= (y_end - self.original_size)
+            y_end = self.original_size
+        
+        # Extract patch
+        patch = image[y_start:y_end, x_start:x_end]
+        
+        # Ensure patch is exactly patch_size×patch_size (pad if necessary)
+        if patch.shape[0] != self.patch_size or patch.shape[1] != self.patch_size:
+            # This should rarely happen, only at extreme boundaries
+            padded_patch = np.zeros((self.patch_size, self.patch_size, 3), dtype=patch.dtype)
+            h, w = patch.shape[:2]
+            padded_patch[:h, :w] = patch
+            patch = padded_patch
+        
+        return patch, (x_start, y_start)
     
     def _build_frame_index(self):
         """Build index of all frames, including gaze file information."""
