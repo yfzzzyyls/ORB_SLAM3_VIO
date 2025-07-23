@@ -30,7 +30,9 @@ class FlexibleResolutionDataset(ProcessedADTDataset):
         target_size: int = 88,
         transform=None,
         use_high_res_patch: bool = False,
-        patch_size: int = 96
+        patch_size: int = 96,
+        return_depth_patch: bool = False,
+        depth_patch_size: int = 16
     ):
         """
         Args:
@@ -40,6 +42,8 @@ class FlexibleResolutionDataset(ProcessedADTDataset):
             transform: Optional transforms to apply
             use_high_res_patch: Whether to extract high-res patch at gaze
             patch_size: Size of the high-res patch (default 96)
+            return_depth_patch: Whether to return depth patch around gaze
+            depth_patch_size: Size of the depth patch to extract (default 16)
         """
         super().__init__(data_root, split, transform)
         self.target_size = target_size
@@ -47,6 +51,8 @@ class FlexibleResolutionDataset(ProcessedADTDataset):
         self.scale_factor = self.original_size / target_size
         self.use_high_res_patch = use_high_res_patch
         self.patch_size = patch_size
+        self.return_depth_patch = return_depth_patch
+        self.depth_patch_size = depth_patch_size
         
         print(f"Flexible resolution dataset initialized:")
         print(f"  Original size: {self.original_size}×{self.original_size}")
@@ -136,6 +142,16 @@ class FlexibleResolutionDataset(ProcessedADTDataset):
                     gaze_info['x'] = max(0, min(gaze_info['x'], self.target_size - 1))
                     gaze_info['y'] = max(0, min(gaze_info['y'], self.target_size - 1))
                     
+                    # Extract depth patch if requested
+                    if self.return_depth_patch:
+                        # Extract patch from resized depth for consistency
+                        depth_patch, valid_mask_patch = self._extract_depth_patch(
+                            depth_resized.squeeze(0).numpy(),
+                            gaze_info['x'],
+                            gaze_info['y'],
+                            self.depth_patch_size
+                        )
+                    
                     # Extract depth patch and compute statistics from RESIZED depth
                     # This ensures consistency with what the model sees
                     depth_patch_stats = self._extract_depth_patch_statistics(
@@ -187,6 +203,11 @@ class FlexibleResolutionDataset(ProcessedADTDataset):
             'original_size': self.original_size,
             'target_size': self.target_size
         }
+        
+        # Add depth patch if requested and gaze is available
+        if self.return_depth_patch and gaze_info is not None:
+            sample_dict['gt_depth_patch'] = torch.from_numpy(depth_patch).float()
+            sample_dict['gt_depth_patch_mask'] = torch.from_numpy(valid_mask_patch).bool()
         
         # Add high-res patch data if available
         if self.use_high_res_patch:
@@ -267,6 +288,52 @@ class FlexibleResolutionDataset(ProcessedADTDataset):
         }
         
         return stats
+    
+    def _extract_depth_patch(self, depth_map, gaze_x, gaze_y, patch_size):
+        """
+        Extract a patch_size x patch_size depth patch centered at gaze location.
+        
+        Args:
+            depth_map: 2D numpy array of depth values
+            gaze_x: x coordinate in the depth map
+            gaze_y: y coordinate in the depth map
+            patch_size: Size of the patch to extract
+            
+        Returns:
+            depth_patch: numpy array of shape (patch_size, patch_size)
+            valid_mask: boolean array indicating valid depth values
+        """
+        H, W = depth_map.shape
+        half_size = patch_size // 2
+        
+        # Calculate patch boundaries
+        x_center = int(round(gaze_x))
+        y_center = int(round(gaze_y))
+        
+        # Initialize with zeros
+        depth_patch = np.zeros((patch_size, patch_size), dtype=np.float32)
+        
+        # Calculate source and destination regions
+        # Source (from depth_map)
+        src_x_start = max(0, x_center - half_size)
+        src_x_end = min(W, x_center + half_size)
+        src_y_start = max(0, y_center - half_size)
+        src_y_end = min(H, y_center + half_size)
+        
+        # Destination (in patch)
+        dst_x_start = max(0, half_size - x_center)
+        dst_x_end = dst_x_start + (src_x_end - src_x_start)
+        dst_y_start = max(0, half_size - y_center)
+        dst_y_end = dst_y_start + (src_y_end - src_y_start)
+        
+        # Copy the data
+        depth_patch[dst_y_start:dst_y_end, dst_x_start:dst_x_end] = \
+            depth_map[src_y_start:src_y_end, src_x_start:src_x_end]
+        
+        # Create valid mask
+        valid_mask = depth_patch > 0
+        
+        return depth_patch, valid_mask
     
     def _get_depth_bin(self, depth):
         """Convert depth to categorical bin."""

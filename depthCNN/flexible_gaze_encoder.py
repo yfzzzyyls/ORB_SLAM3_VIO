@@ -153,7 +153,7 @@ class FlexibleGazeEncoder(nn.Module):
 class FlexibleGazeOnlyDepth(nn.Module):
     """
     Complete flexible model for gaze-only depth prediction supporting various image sizes.
-    Now with multi-task learning capabilities.
+    Now with multi-task learning capabilities and patch prediction support.
     """
     
     def __init__(
@@ -165,7 +165,9 @@ class FlexibleGazeOnlyDepth(nn.Module):
         max_depth: float = 10.0,
         min_depth: float = 0.1,
         use_multi_scale_supervision: bool = True,
-        use_multi_task: bool = False
+        use_multi_task: bool = False,
+        predict_patch: bool = False,
+        patch_size: int = 16
     ):
         """
         Args:
@@ -177,6 +179,8 @@ class FlexibleGazeOnlyDepth(nn.Module):
             min_depth: Minimum depth value
             use_multi_scale_supervision: Whether to use auxiliary losses
             use_multi_task: Whether to use multi-task learning with patch statistics
+            predict_patch: Whether to predict a patch of depth values instead of single point
+            patch_size: Size of the depth patch to predict (e.g., 16 for 16x16)
         """
         super().__init__()
         
@@ -186,6 +190,8 @@ class FlexibleGazeOnlyDepth(nn.Module):
         self.min_depth = min_depth
         self.use_multi_scale_supervision = use_multi_scale_supervision
         self.use_multi_task = use_multi_task
+        self.predict_patch = predict_patch
+        self.patch_size = patch_size
         
         # Flexible encoder
         self.encoder = FlexibleGazeEncoder(
@@ -352,6 +358,47 @@ class FlexibleGazeOnlyDepth(nn.Module):
         
         return sampled.squeeze(2).squeeze(2)  # [B, C]
     
+    def extract_patch_features(
+        self,
+        feature_map: torch.Tensor,
+        gaze_x: torch.Tensor,
+        gaze_y: torch.Tensor,
+        patch_size: int
+    ) -> torch.Tensor:
+        """Extract features for patch_size x patch_size grid around gaze - ALL IN PARALLEL."""
+        B, C, H, W = feature_map.shape
+        device = feature_map.device
+        
+        # Generate patch_size x patch_size grid positions centered at gaze
+        offset = torch.arange(patch_size, device=device) - (patch_size - 1) / 2  # [-7.5, -6.5, ..., 7.5] for 16x16
+        grid_y, grid_x = torch.meshgrid(offset, offset, indexing='ij')
+        grid_positions = torch.stack([grid_x.flatten(), grid_y.flatten()], dim=-1)  # [patch_size^2, 2]
+        
+        # Add to gaze position for all samples in batch
+        gaze_positions = torch.stack([gaze_x, gaze_y], dim=-1)  # [B, 2]
+        positions = gaze_positions.unsqueeze(1) + grid_positions.unsqueeze(0)  # [B, patch_size^2, 2]
+        
+        # Normalize to [-1, 1] for grid_sample
+        positions_x = 2.0 * positions[..., 0] / (W - 1) - 1.0
+        positions_y = 2.0 * positions[..., 1] / (H - 1) - 1.0
+        normalized_positions = torch.stack([positions_x, positions_y], dim=-1)  # [B, patch_size^2, 2]
+        
+        # Reshape for grid_sample: [B, patch_size^2, 1, 2] -> [B, 1, patch_size^2, 2]
+        sample_grid = normalized_positions.unsqueeze(2).transpose(1, 2)
+        
+        # Sample features: [B, C, 1, patch_size^2]
+        sampled = F.grid_sample(
+            feature_map, sample_grid,
+            mode='bilinear',
+            padding_mode='border',
+            align_corners=True
+        )
+        
+        # Reshape: [B, C, 1, patch_size^2] -> [B, patch_size^2, C]
+        sampled = sampled.squeeze(2).transpose(1, 2)
+        
+        return sampled
+    
     def forward(
         self,
         rgb: torch.Tensor,
@@ -372,30 +419,66 @@ class FlexibleGazeOnlyDepth(nn.Module):
         # Encode image
         features = self.encoder(rgb)
         
-        # Extract and project gaze features from each scale
-        gaze_features = []
-        for i, (feat, proj) in enumerate(zip(features, self.gaze_projections)):
-            # Scale gaze coordinates for this level
-            scale_factor = 2 ** (i + 1)  # 2, 4, 8 for levels 1, 2, 3
-            scaled_gaze_x = gaze_x / scale_factor
-            scaled_gaze_y = gaze_y / scale_factor
+        if self.predict_patch:
+            # Extract features for patch_size x patch_size grid
+            all_patch_features = []
+            for i, (feat, proj) in enumerate(zip(features, self.gaze_projections)):
+                # Scale gaze coordinates for this level
+                scale_factor = 2 ** (i + 1)  # 2, 4, 8 for levels 1, 2, 3
+                scaled_gaze_x = gaze_x / scale_factor
+                scaled_gaze_y = gaze_y / scale_factor
+                
+                # Extract features at all patch positions
+                patch_feat = self.extract_patch_features(feat, scaled_gaze_x, scaled_gaze_y, self.patch_size)
+                # patch_feat shape: [B, patch_size^2, C]
+                
+                # Project to common dimension
+                B, N, C = patch_feat.shape
+                patch_feat_flat = patch_feat.reshape(B * N, C)
+                projected_flat = proj(patch_feat_flat)
+                projected = projected_flat.reshape(B, N, -1)
+                all_patch_features.append(projected)
             
-            # Extract features at gaze
-            gaze_feat = self.extract_gaze_features(feat, scaled_gaze_x, scaled_gaze_y)
+            # Concatenate all scale features: [B, patch_size^2, total_feat_dim]
+            combined_features = torch.cat(all_patch_features, dim=-1)
             
-            # Project to common dimension
-            projected = proj(gaze_feat)
-            gaze_features.append(projected)
-        
-        # Concatenate all gaze features
-        combined_features = torch.cat(gaze_features, dim=1)
-        
-        # Predict depth
-        depth_logit = self.depth_predictor(combined_features)
-        depth = torch.sigmoid(depth_logit) * self.max_depth
-        depth = torch.clamp(depth, min=self.min_depth, max=self.max_depth)
-        
-        outputs = {'depth': depth}
+            # Predict depth at each position
+            B, N, F = combined_features.shape
+            combined_flat = combined_features.reshape(B * N, F)
+            depth_logit_flat = self.depth_predictor(combined_flat)
+            depth_logit = depth_logit_flat.reshape(B, N)
+            
+            # Apply activation and reshape to patch
+            depth = torch.sigmoid(depth_logit) * self.max_depth
+            depth = torch.clamp(depth, min=self.min_depth, max=self.max_depth)
+            depth_patch = depth.reshape(B, self.patch_size, self.patch_size)
+            
+            outputs = {'depth': depth_patch}
+        else:
+            # Original single-point prediction
+            gaze_features = []
+            for i, (feat, proj) in enumerate(zip(features, self.gaze_projections)):
+                # Scale gaze coordinates for this level
+                scale_factor = 2 ** (i + 1)  # 2, 4, 8 for levels 1, 2, 3
+                scaled_gaze_x = gaze_x / scale_factor
+                scaled_gaze_y = gaze_y / scale_factor
+                
+                # Extract features at gaze
+                gaze_feat = self.extract_gaze_features(feat, scaled_gaze_x, scaled_gaze_y)
+                
+                # Project to common dimension
+                projected = proj(gaze_feat)
+                gaze_features.append(projected)
+            
+            # Concatenate all gaze features
+            combined_features = torch.cat(gaze_features, dim=1)
+            
+            # Predict depth
+            depth_logit = self.depth_predictor(combined_features)
+            depth = torch.sigmoid(depth_logit) * self.max_depth
+            depth = torch.clamp(depth, min=self.min_depth, max=self.max_depth)
+            
+            outputs = {'depth': depth}
         
         # Multi-task predictions
         if self.use_multi_task and self.training:
@@ -426,8 +509,8 @@ class FlexibleGazeOnlyDepth(nn.Module):
             bin_logits = self.depth_bin_predictor(aux_features)
             outputs['pred_depth_bin'] = bin_logits  # Raw logits for cross-entropy loss
         
-        # Auxiliary predictions for multi-scale supervision
-        if self.use_multi_scale_supervision and self.training:
+        # Auxiliary predictions for multi-scale supervision (only for single-point mode)
+        if self.use_multi_scale_supervision and self.training and not self.predict_patch:
             aux_depths = []
             # Use features from scales 2 and 3 (skip scale 1)
             for i in range(1, len(gaze_features)):
