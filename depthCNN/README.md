@@ -222,7 +222,93 @@ The evaluation will report:
 - **Latency**: Inference time per frame and FPS
 - **Training info**: Best validation metrics from checkpoint
 
-### 5. Export to TensorRT (optional)
+### 5. Demo: Quick Testing on Single Images
+
+The `evaluate_demo.py` script allows quick testing of trained models on individual images with visualization.
+
+#### Basic Usage
+```bash
+# Test on a single image with gaze location
+python evaluate_demo.py \
+    --checkpoint <path_to_checkpoint> \
+    --image <path_to_image> \
+    --gaze-x <x_coordinate> \
+    --gaze-y <y_coordinate> \
+    --save-output <output_filename>
+```
+
+#### Examples
+
+##### Test Spatial Patch Model (16×16 output)
+```bash
+# Test on validation data
+python evaluate_demo.py \
+    --checkpoint ./checkpoints/spatial_gaze_replication_16x16/checkpoint_best.pth \
+    --image /mnt/ssd_ext/incSeg-data/processed_adt/val/Apartment_release_clean_seq135_M1292/rgb/frame_000010.png \
+    --gaze-x 717 \
+    --gaze-y 532 \
+    --save-output demo_spatial_val.png
+
+# Test on unseen test data
+python evaluate_demo.py \
+    --checkpoint ./checkpoints/spatial_gaze_replication_16x16/checkpoint_best.pth \
+    --image /mnt/ssd_ext/incSeg-data/processed_adt/test/Apartment_release_clean_seq148_M1292/rgb/frame_000050.png \
+    --gaze-x 819 \
+    --gaze-y 578 \
+    --save-output demo_spatial_test.png
+```
+
+##### Test Other Model Types
+```bash
+# Lightweight gaze model
+python evaluate_demo.py \
+    --checkpoint ./checkpoints/lightweight_gaze/checkpoint_best.pth \
+    --image /mnt/ssd_ext/incSeg-data/processed_adt/val/Apartment_release_clean_seq135_M1292/rgb/frame_000010.png \
+    --gaze-x 717 \
+    --gaze-y 532 \
+    --visualize
+
+# Dual-resolution model
+python evaluate_demo.py \
+    --checkpoint ./checkpoints/dual_resolution/checkpoint_best.pth \
+    --image /mnt/ssd_ext/incSeg-data/processed_adt/test/Apartment_release_clean_seq148_M1292/rgb/frame_000050.png \
+    --gaze-x 819 \
+    --gaze-y 578 \
+    --save-output demo_dual_test.png
+```
+
+#### Features
+
+1. **Automatic Model Detection**: Detects model type from checkpoint path
+2. **Ground Truth Comparison**: Automatically loads and compares with ground truth depth if available
+3. **Error Visualization**: Shows prediction error as percentage with color coding:
+   - Green: < 10% error (excellent)
+   - Yellow: 10-20% error (good)
+   - Orange: > 20% error (needs improvement)
+4. **Spatial Patch Support**: For models that output patches (e.g., 16×16), extracts center pixel as gaze depth
+
+#### Output Visualization
+
+The saved image shows:
+- **Left**: Original image with gaze marker
+- **Right**: Model input (88×88) with:
+  - Predicted depth
+  - Ground truth depth (if available)
+  - Error percentage with color coding
+  - All values displayed in annotation box
+
+#### Command Options
+
+- `--checkpoint`: Path to model checkpoint (required)
+- `--image`: Path to input image (required)
+- `--gaze-x`: X coordinate of gaze in original image (required)
+- `--gaze-y`: Y coordinate of gaze in original image (required)
+- `--save-output`: Save visualization to file
+- `--visualize`: Show result interactively (matplotlib window)
+- `--device`: Device to use ('cuda' or 'cpu', default: cuda)
+- `--model-type`: Override auto-detection ('single', 'multitask', 'dual', 'spatial', 'spatial_aux')
+
+### 6. Export to TensorRT (optional)
 ```bash
 python export_tensorrt.py \
     --checkpoint checkpoints/best_model.pth \
@@ -612,3 +698,32 @@ python train_flexible_gaze.py \
 - **High-res details**: 96×96 patch provides fine-grained features at gaze
 - **Context awareness**: 88×88 image provides scene understanding
 - **Best of both**: Combines efficiency of low-res with accuracy of high-res
+
+## Patch Prediction Mode (New)
+
+### Overview
+Instead of predicting a single depth value at the gaze location, this mode predicts a 16×16 depth patch around the gaze point. This forces the model to learn local spatial features and prevents overfitting to point predictions.
+
+### Training Command
+```bash
+python train_flexible_gaze.py \
+    --data-root ./processed_data \
+    --predict-patch \
+    --depth-patch-size 16 \
+    --batch-size 32 \
+    --lr 2e-4 \
+    --epochs 50 \
+    --checkpoint-dir ./checkpoints/patch_prediction
+```
+
+### Key Features
+- **Parallel Feature Extraction**: Extracts features at 256 points (16×16) simultaneously using GPU
+- **Spatial Smoothness Loss**: Encourages consistent depth predictions within the patch
+- **Flexible Patch Sizes**: Supports any patch size (8×8, 16×16, 32×32, etc.)
+- **Same Architecture**: Uses standard 3-level encoder, only changes output dimension
+
+### Benefits
+- **Better Generalization**: Forces model to understand local context
+- **Richer Supervision**: 256 supervision points instead of 1
+- **Prevents Overfitting**: Can't memorize single-point predictions
+- **Comparable Efficiency**: Same encoder, minimal overhead from parallel extraction
