@@ -24,6 +24,7 @@ from flexible_gaze_encoder import FlexibleGazeOnlyDepth, DualResolutionGazeDepth
 from lightweight_dual_resolution import LightweightDualResolution
 from spatial_patch_encoder import SpatialPatchDepthPredictor
 from spatial_patch_encoder_aux import SpatialPatchDepthPredictorWithAux
+from model_rtmonodepth import RTMonoDepthS
 
 
 def parse_args():
@@ -68,26 +69,56 @@ def parse_args():
 
 
 def detect_model_type(checkpoint_path):
-    """Auto-detect model type from checkpoint path."""
+    """Auto-detect model type from checkpoint path and state dict."""
     path_lower = checkpoint_path.lower()
     
-    # First, try to load checkpoint to check for aux decoders
+    # First, try to load checkpoint to check state dict and args
     try:
         checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+        
+        # Extract state dict
         if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
             state_dict = checkpoint['model_state_dict']
+            # Also check for saved args which might have model info
+            args = checkpoint.get('args', {})
         else:
             state_dict = checkpoint
+            args = {}
         
-        # Check for auxiliary decoders in state dict
-        if any('aux_decoders' in key for key in state_dict.keys()):
-            if 'spatial' in path_lower:
-                return 'spatial_aux'
-    except:
-        pass
+        # Check for model type in saved args first
+        if 'model_type' in args:
+            return args['model_type']
+        
+        # Check state dict keys for model architecture hints
+        state_keys = list(state_dict.keys())
+        
+        # Check for RT-MonoDepth signature
+        if any('encoder.model' in key for key in state_keys):
+            return 'rtmonodepth'
+        
+        # Check for auxiliary decoders (spatial models with aux)
+        if any('aux_decoders' in key for key in state_keys):
+            return 'spatial_aux'
+        
+        # Check for main_decoder (also indicates spatial with aux)
+        if any('main_decoder' in key for key in state_keys):
+            return 'spatial_aux'
+        
+        # Check for dual resolution signatures
+        if any('context_encoder' in key and 'patch_encoder' in key for key in state_keys):
+            return 'dual'
+        
+        # Check for spatial patch predictor
+        if any('spatial_extractor' in key or 'spatial_decoder' in key for key in state_keys):
+            return 'spatial'
+            
+    except Exception as e:
+        print(f"Warning: Could not load checkpoint for type detection: {e}")
     
     # Fallback to path-based detection
-    if 'spatial' in path_lower and 'aux' in path_lower:
+    if 'lowres' in path_lower or 'rtmonodepth' in path_lower:
+        return 'rtmonodepth'
+    elif 'spatial' in path_lower and 'aux' in path_lower:
         return 'spatial_aux'
     elif 'spatial' in path_lower:
         return 'spatial'
@@ -110,44 +141,70 @@ def load_model(args, device):
     else:
         model_type = args.model_type
     
+    # Try to load checkpoint first to get saved args
+    checkpoint_data = None
+    saved_args = {}
+    try:
+        checkpoint_data = torch.load(args.checkpoint, map_location='cpu', weights_only=False)
+        if isinstance(checkpoint_data, dict):
+            saved_args = checkpoint_data.get('args', {})
+    except:
+        pass
+    
     # Create appropriate model
     if model_type == 'spatial_aux':
         print(f"Loading spatial patch model with auxiliary losses")
+        # Use saved args if available
+        patch_size = saved_args.get('depth_patch_size', 16)
+        spatial_region_size = saved_args.get('spatial_region_size', 5)
+        
         model = SpatialPatchDepthPredictorWithAux(
             image_size=args.image_size,
-            num_encoder_levels=args.encoder_levels,
-            base_channels=args.base_channels,
-            spatial_region_size=5,
-            patch_size=16,  # Always 16x16 for spatial models
+            num_encoder_levels=saved_args.get('encoder_levels', args.encoder_levels),
+            base_channels=saved_args.get('base_channels', args.base_channels),
+            spatial_region_size=spatial_region_size,
+            patch_size=patch_size,
             use_auxiliary_losses=True
         )
         is_dual = False
         is_spatial = True
+        print(f"  Patch size: {patch_size}, Region size: {spatial_region_size}")
+        
     elif model_type == 'spatial':
         print(f"Loading spatial patch model")
+        # Use saved args if available
+        patch_size = saved_args.get('depth_patch_size', 16)
+        spatial_region_size = saved_args.get('spatial_region_size', 5)
+        
         model = SpatialPatchDepthPredictor(
             image_size=args.image_size,
-            num_encoder_levels=args.encoder_levels,
-            base_channels=args.base_channels,
-            spatial_region_size=5,
-            patch_size=16  # Always 16x16 for spatial models
+            num_encoder_levels=saved_args.get('encoder_levels', args.encoder_levels),
+            base_channels=saved_args.get('base_channels', args.base_channels),
+            spatial_region_size=spatial_region_size,
+            patch_size=patch_size
         )
         is_dual = False
         is_spatial = True
+        print(f"  Patch size: {patch_size}, Region size: {spatial_region_size}")
+        
     elif model_type == 'lightweight_dual':
         print(f"Loading lightweight dual-resolution model")
         model = LightweightDualResolution(
-            base_channels=args.base_channels,
-            encoder_levels=args.encoder_levels,
-            patch_size=args.patch_size,
-            context_region_size=args.context_region_size
+            base_channels=saved_args.get('base_channels', args.base_channels),
+            encoder_levels=saved_args.get('encoder_levels', args.encoder_levels),
+            patch_size=saved_args.get('patch_size', args.patch_size),
+            context_region_size=saved_args.get('context_region_size', args.context_region_size)
         )
         is_dual = True
         is_spatial = False
+        
     elif model_type == 'dual':
         print(f"Loading dual-resolution model")
-        # Try to infer patch_channels from checkpoint path or use args
-        patch_channels = args.base_channels  # Use same as context by default
+        # Try to infer configuration from saved args or checkpoint name
+        context_channels = saved_args.get('context_channels', args.base_channels)
+        patch_channels = saved_args.get('patch_channels', args.base_channels)
+        
+        # Override from checkpoint name if present
         if 'ch32' in args.checkpoint:
             patch_channels = 32
             print(f"Detected patch_channels=32 from checkpoint path")
@@ -155,41 +212,122 @@ def load_model(args, device):
             patch_channels = 48
             print(f"Detected patch_channels=48 from checkpoint path")
         
+        # Check for output size in saved args or filename
+        output_size = 11  # default
+        if saved_args.get('output_size'):
+            output_size = saved_args['output_size']
+        elif '3x3' in args.checkpoint:
+            output_size = 3
+            print(f"Detected 3x3 output from checkpoint path")
+        
         model = DualResolutionGazeDepth(
             context_size=args.image_size,
-            context_levels=args.encoder_levels,
-            context_channels=args.base_channels,
-            patch_size=args.patch_size,
-            patch_levels=args.encoder_levels,
+            context_levels=saved_args.get('context_levels', args.encoder_levels),
+            context_channels=context_channels,
+            patch_size=saved_args.get('patch_size', args.patch_size),
+            patch_levels=saved_args.get('patch_levels', args.encoder_levels),
             patch_channels=patch_channels,
+            output_size=output_size,
             max_depth=10.0,
             min_depth=0.1
         )
         is_dual = True
         is_spatial = False
+        print(f"  Output size: {output_size}x{output_size}")
+        
+    elif model_type == 'rtmonodepth':
+        print(f"RT-MonoDepth detected - using specialized evaluation")
+        
+        # For RT-MonoDepth, we need special handling due to architecture variations
+        # Defer to the specialized evaluate_rtmonodepth.py script
+        import subprocess
+        import sys
+        
+        # Build command for RT-MonoDepth evaluation
+        cmd = [
+            sys.executable, 'evaluate_rtmonodepth.py',
+            '--checkpoint', args.checkpoint,
+            '--image', args.image,
+            '--gaze-x', str(args.gaze_x),
+            '--gaze-y', str(args.gaze_y)
+        ]
+        
+        if args.save_output:
+            cmd.extend(['--save-output', args.save_output])
+        
+        if args.device:
+            cmd.extend(['--device', args.device])
+        
+        print("Launching RT-MonoDepth evaluation...")
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        
+        print(result.stdout)
+        if result.stderr:
+            print("STDERR:", result.stderr)
+        
+        # Exit after RT-MonoDepth evaluation
+        sys.exit(result.returncode)
+        
+        # This code won't be reached but kept for reference
+        model = RTMonoDepthS()
+        is_dual = False
+        is_spatial = False
+        
     else:
         print(f"Loading single-resolution model ({'multi-task' if model_type == 'multitask' else 'standard'})")
         use_multi_task = (model_type == 'multitask')
+        
+        # Check for predict_patch in saved args
+        # Handle both dict and Namespace types
+        if isinstance(saved_args, dict):
+            predict_patch = saved_args.get('predict_patch', False)
+            patch_size = saved_args.get('depth_patch_size', 16) if predict_patch else None
+        else:
+            # It's a Namespace object from older checkpoints
+            predict_patch = getattr(saved_args, 'predict_patch', False)
+            patch_size = getattr(saved_args, 'depth_patch_size', 16) if predict_patch else None
+        
+        # Get parameters from saved args
+        if isinstance(saved_args, dict):
+            encoder_levels = saved_args.get('encoder_levels', args.encoder_levels)
+            base_channels = saved_args.get('base_channels', args.base_channels)
+        else:
+            encoder_levels = getattr(saved_args, 'encoder_levels', args.encoder_levels)
+            base_channels = getattr(saved_args, 'base_channels', args.base_channels)
+            
         model = FlexibleGazeOnlyDepth(
-            num_encoder_levels=args.encoder_levels,
-            base_channels=args.base_channels,
+            num_encoder_levels=encoder_levels,
+            base_channels=base_channels,
             gaze_feature_dim=64,
             image_size=args.image_size,
             max_depth=10.0,
             min_depth=0.1,
             use_multi_scale_supervision=True,
-            use_multi_task=use_multi_task
+            use_multi_task=use_multi_task,
+            predict_patch=predict_patch,
+            patch_size=patch_size
         )
         is_dual = False
-        is_spatial = False
+        is_spatial = predict_patch  # If predicting patch, treat as spatial
+        if predict_patch:
+            print(f"  Patch prediction mode: {patch_size}x{patch_size}")
     
     # Load checkpoint
     print(f"Loading weights from: {args.checkpoint}")
-    checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
+    if checkpoint_data is None:
+        checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
+    else:
+        checkpoint = checkpoint_data
     
     if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-        model.load_state_dict(checkpoint['model_state_dict'])
-        print(f"Loaded checkpoint from epoch {checkpoint.get('epoch', 'unknown')}")
+        # Try to load state dict with strict=False to handle minor mismatches
+        try:
+            model.load_state_dict(checkpoint['model_state_dict'], strict=True)
+            print(f"Loaded checkpoint from epoch {checkpoint.get('epoch', 'unknown')}")
+        except RuntimeError as e:
+            print(f"Warning: Loading with strict=False due to: {e}")
+            model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+            print(f"Loaded checkpoint (partial match) from epoch {checkpoint.get('epoch', 'unknown')}")
     else:
         model.load_state_dict(checkpoint)
     
@@ -304,25 +442,42 @@ def predict_depth(model, image_tensor, patch_tensor, gaze_x, gaze_y, is_dual, is
         gaze_x_tensor = torch.tensor([gaze_x], dtype=torch.float32).to(device)
         gaze_y_tensor = torch.tensor([gaze_y], dtype=torch.float32).to(device)
         
-        # Run inference
-        if is_dual:
+        # Check if it's RT-MonoDepth model (outputs full depth map)
+        if isinstance(model, RTMonoDepthS):
+            # RT-MonoDepth outputs full depth map
+            outputs = model(image_batch)
+            depth_map = outputs['depth']  # Shape: [1, 1, H, W]
+            
+            # Extract depth at gaze location
+            # Convert gaze coordinates to integers
+            gaze_x_int = int(round(gaze_x))
+            gaze_y_int = int(round(gaze_y))
+            
+            # Get depth map dimensions
+            h, w = depth_map.shape[2], depth_map.shape[3]
+            
+            # Ensure coordinates are within bounds
+            gaze_x_int = max(0, min(gaze_x_int, w - 1))
+            gaze_y_int = max(0, min(gaze_y_int, h - 1))
+            
+            depth = depth_map[0, 0, gaze_y_int, gaze_x_int].item()
+        elif is_dual:
+            # Dual-resolution model
             patch_batch = patch_tensor.unsqueeze(0).to(device)
             outputs = model(image_batch, patch_batch, gaze_x_tensor, gaze_y_tensor)
-        else:
+            depth = outputs['depth'].item()
+        elif is_spatial:
+            # Spatial patch models
             outputs = model(image_batch, gaze_x_tensor, gaze_y_tensor)
-        
-        # Extract depth prediction
-        if is_spatial:
             # For spatial models, output is a 16x16 patch
             # Extract the center pixel as the gaze depth
             depth_patch = outputs['depth']  # Shape: [1, 16, 16]
             center_y = depth_patch.shape[1] // 2  # 8
             center_x = depth_patch.shape[2] // 2  # 8
             depth = depth_patch[0, center_y, center_x].item()
-            
-            # Optionally, we could also return the full patch for visualization
-            # but for now we just return the center depth
         else:
+            # Standard gaze-only models
+            outputs = model(image_batch, gaze_x_tensor, gaze_y_tensor)
             depth = outputs['depth'].item()
         
     return depth
