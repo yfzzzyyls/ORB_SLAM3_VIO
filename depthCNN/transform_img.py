@@ -1257,19 +1257,11 @@ def use_depth_predictor(model, device, image_path=None, gaze_x=None, gaze_y=None
     else:
         image_tensor = image_path
     
-    # Model expects 88x88 context and 44x44 patch
-    # Resize full image to 88x88 for context
-    context = F.interpolate(
+    # Model expects 88x88 input image
+    # Resize full image to 88x88
+    input_image = F.interpolate(
         image_tensor.unsqueeze(0),
         size=(88, 88),
-        mode='bilinear',
-        align_corners=True
-    )
-    
-    # Create 44x44 patch (for this model, it's just resized version)
-    patch = F.interpolate(
-        image_tensor.unsqueeze(0),
-        size=(44, 44),
         mode='bilinear',
         align_corners=True
     )
@@ -1279,14 +1271,13 @@ def use_depth_predictor(model, device, image_path=None, gaze_x=None, gaze_y=None
     scaled_y = gaze_y * 88 / 1408
     
     # Prepare inputs
-    context = context.to(device)
-    patch = patch.to(device)
+    input_image = input_image.to(device)
     gaze_x_tensor = torch.tensor([scaled_x], dtype=torch.float32).to(device)
     gaze_y_tensor = torch.tensor([scaled_y], dtype=torch.float32).to(device)
     
     # Run inference
     with torch.no_grad():
-        outputs = model(context, patch, gaze_x_tensor, gaze_y_tensor)
+        outputs = model(input_image, gaze_x_tensor, gaze_y_tensor)
         depth_output = outputs['depth']  # Shape: [1, 16, 16]
         
         # Extract center pixel as the depth at gaze point
