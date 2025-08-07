@@ -6,6 +6,7 @@ import argparse
 import numpy as np
 from datetime import datetime
 from tqdm import tqdm
+from copy import deepcopy
 
 import torch
 import torch.nn as nn
@@ -131,6 +132,36 @@ def reduce_metric(metric, world_size):
     return metric_tensor.item() / world_size
 
 
+def add_weight_decay(model, wd, skip_modules=(nn.GroupNorm, nn.BatchNorm2d), skip_keywords=('bias',)):
+    """Create param groups with selective weight decay."""
+    decay, no_decay = [], []
+    for m in model.modules():
+        if isinstance(m, skip_modules):
+            for p in m.parameters(recurse=False):
+                if p.requires_grad: 
+                    no_decay.append(p)
+        else:
+            for n, p in m.named_parameters(recurse=False):
+                if not p.requires_grad:
+                    continue
+                if any(k in n for k in skip_keywords):
+                    no_decay.append(p)
+                else:
+                    decay.append(p)
+    return [{'params': decay, 'weight_decay': wd},
+            {'params': no_decay, 'weight_decay': 0.0}]
+
+
+@torch.no_grad()
+def ema_update(student, teacher, decay):
+    """Update EMA model weights."""
+    s = student.module if isinstance(student, DDP) else student
+    for ps, pt in zip(s.parameters(), teacher.parameters()):
+        pt.data.mul_(decay).add_(ps.data, alpha=1.0 - decay)
+    for bs, bt in zip(s.buffers(), teacher.buffers()):
+        bt.copy_(bs)
+
+
 def compute_metrics(pred, target, mask):
     """Compute evaluation metrics."""
     # Apply mask
@@ -170,7 +201,7 @@ def compute_metrics(pred, target, mask):
 
 
 def train_epoch(model, train_loader, optimizer, scheduler, loss_fns, epoch, 
-                writer, distributed, rank, world_size):
+                writer, distributed, rank, world_size, model_ema=None, ema_decay=0.999):
     """Train for one epoch."""
     model.train()
     
@@ -223,6 +254,10 @@ def train_epoch(model, train_loader, optimizer, scheduler, loss_fns, epoch,
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
         
         optimizer.step()
+        
+        # Update EMA model
+        if model_ema is not None:
+            ema_update(model, model_ema, ema_decay)
         
         # Compute metrics
         with torch.no_grad():
@@ -401,9 +436,9 @@ def main():
                        help='Save checkpoint every N epochs')
     parser.add_argument('--local_rank', type=int, default=0,
                        help='Local rank for distributed training')
-    parser.add_argument('--max-train-sequences', type=int, default=20,
+    parser.add_argument('--max-train-sequences', type=int, default=30,
                        help='Maximum number of training sequences to use')
-    parser.add_argument('--max-val-sequences', type=int, default=2,
+    parser.add_argument('--max-val-sequences', type=int, default=7,
                        help='Maximum number of validation sequences to use')
     parser.add_argument('--random-seed', type=int, default=42,
                        help='Random seed for sequence selection')
@@ -472,13 +507,33 @@ def main():
         pin_memory=True
     )
     
-    # Create optimizer and scheduler
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr,
-                                 weight_decay=args.weight_decay)
+    # Create optimizer with selective weight decay
+    target_for_groups = model.module if isinstance(model, DDP) else model
+    param_groups = add_weight_decay(target_for_groups, wd=args.weight_decay)
+    optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.999))
     
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=args.epochs, eta_min=1e-6
+    # Create warm-up + cosine scheduler
+    warmup_epochs = 5
+    cosine_epochs = args.epochs - warmup_epochs
+    
+    warmup = torch.optim.lr_scheduler.LinearLR(
+        optimizer, start_factor=0.01, end_factor=1.0, total_iters=warmup_epochs
     )
+    cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=cosine_epochs, eta_min=1e-6
+    )
+    scheduler = torch.optim.lr_scheduler.SequentialLR(
+        optimizer, schedulers=[warmup, cosine], milestones=[warmup_epochs]
+    )
+    
+    # Create EMA model
+    ema_decay = 0.999  # Can be tuned (0.999-0.9995)
+    if isinstance(model, DDP):
+        model_ema = deepcopy(model.module).cuda().eval()
+    else:
+        model_ema = deepcopy(model).cuda().eval()
+    for p in model_ema.parameters():
+        p.requires_grad_(False)
     
     # Create loss functions
     si_log_loss = SILogLoss(alpha=0.85)
@@ -517,12 +572,19 @@ def main():
         # Train
         train_loss, train_metrics = train_epoch(
             model, train_loader, optimizer, scheduler, loss_fns,
-            epoch, writer, distributed, rank, world_size
+            epoch, writer, distributed, rank, world_size,
+            model_ema=model_ema, ema_decay=ema_decay
         )
         
-        # Validate
+        # Validate regular model
         val_loss, val_metrics = validate(
             model, val_loader, loss_fns, epoch, writer,
+            distributed, rank, world_size
+        )
+        
+        # Validate EMA model
+        ema_val_loss, ema_val_metrics = validate(
+            model_ema, val_loader, loss_fns, epoch, writer,
             distributed, rank, world_size
         )
         
@@ -533,29 +595,34 @@ def main():
                   f"RMSE: {train_metrics['rmse']:.3f}, a1: {train_metrics['a1']:.3f}")
             print(f"  Val Loss: {val_loss:.4f}, AbsRel: {val_metrics['abs_rel']:.3f}, "
                   f"RMSE: {val_metrics['rmse']:.3f}, a1: {val_metrics['a1']:.3f}")
+            print(f"  EMA Val Loss: {ema_val_loss:.4f}, AbsRel: {ema_val_metrics['abs_rel']:.3f}, "
+                  f"RMSE: {ema_val_metrics['rmse']:.3f}, a1: {ema_val_metrics['a1']:.3f}")
                   
         # Save checkpoint
         if rank == 0 and (epoch + 1) % args.save_freq == 0:
             checkpoint = {
                 'epoch': epoch,
                 'model': model.module.state_dict() if distributed else model.state_dict(),
+                'model_ema': model_ema.module.state_dict() if (distributed and hasattr(model_ema, 'module')) else model_ema.state_dict(),
                 'optimizer': optimizer.state_dict(),
                 'scheduler': scheduler.state_dict(),
                 'train_loss': train_loss,
                 'val_loss': val_loss,
+                'ema_val_loss': ema_val_loss,
                 'train_metrics': train_metrics,
                 'val_metrics': val_metrics,
+                'ema_val_metrics': ema_val_metrics,
                 'best_val_loss': best_val_loss,
                 'args': args
             }
             
             torch.save(checkpoint, os.path.join(args.checkpoint_dir, f'checkpoint_epoch_{epoch+1}.pth'))
             
-            # Save best model
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
+            # Save best model (using EMA validation loss)
+            if ema_val_loss < best_val_loss:
+                best_val_loss = ema_val_loss
                 torch.save(checkpoint, os.path.join(args.checkpoint_dir, 'checkpoint_best.pth'))
-                print(f"  New best model saved (val_loss: {val_loss:.4f})")
+                print(f"  New best model saved (ema_val_loss: {ema_val_loss:.4f})")
                 
             # Save latest
             torch.save(checkpoint, os.path.join(args.checkpoint_dir, 'checkpoint_latest.pth'))

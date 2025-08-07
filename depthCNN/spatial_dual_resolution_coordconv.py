@@ -90,11 +90,13 @@ class SpatialDualResolutionGazeDepth(nn.Module):
             nn.GroupNorm(32, 192),
             nn.ReLU(inplace=True)
         )
+        self.dropout = nn.Dropout2d(p=0.10)  # After pointwise fusion
         
         # Lightweight decoder at 22x22 only (no 44x44 detour)
         self.decode_dw = nn.Conv2d(192, 192, kernel_size=3, padding=1, groups=192)
         self.decode_pw = nn.Conv2d(192, 96, kernel_size=1)
         self.decode_gn = nn.GroupNorm(16, 96)
+        self.head_dropout = nn.Dropout2d(p=0.10)  # Just before final convs
         
         # Final channel reduction
         self.decode_final = nn.Conv2d(96, 48, kernel_size=1)
@@ -252,10 +254,12 @@ class SpatialDualResolutionGazeDepth(nn.Module):
         # Pointwise fusion only (as specified)
         fused = torch.cat([ctx_roi, p3], dim=1)  # [B, 384, 22, 22]
         fused = self.fuse_1x1(fused)  # [B, 128, 22, 22]
+        fused = self.dropout(fused)  # Apply dropout after fusion
         
         # Lightweight decoder at 22x22 only
         d_dw = self.decode_dw(fused)
         d = F.relu(self.decode_gn(self.decode_pw(d_dw)))  # [B, 64, 22, 22]
+        d = self.head_dropout(d)  # Apply dropout before final layers
         d_final = self.decode_final(d)  # [B, 32, 22, 22]
         
         # Final predictions at 22x22
