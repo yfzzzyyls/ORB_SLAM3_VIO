@@ -599,7 +599,7 @@ def main():
                   f"RMSE: {ema_val_metrics['rmse']:.3f}, a1: {ema_val_metrics['a1']:.3f}")
                   
         # Save checkpoint
-        if rank == 0 and (epoch + 1) % args.save_freq == 0:
+        if rank == 0:
             checkpoint = {
                 'epoch': epoch,
                 'model': model.module.state_dict() if distributed else model.state_dict(),
@@ -616,15 +616,13 @@ def main():
                 'args': args
             }
             
-            torch.save(checkpoint, os.path.join(args.checkpoint_dir, f'checkpoint_epoch_{epoch+1}.pth'))
-            
             # Save best model (using EMA validation loss)
             if ema_val_loss < best_val_loss:
                 best_val_loss = ema_val_loss
                 torch.save(checkpoint, os.path.join(args.checkpoint_dir, 'checkpoint_best.pth'))
                 print(f"  New best model saved (ema_val_loss: {ema_val_loss:.4f})")
                 
-            # Save latest
+            # Always save latest checkpoint every epoch
             torch.save(checkpoint, os.path.join(args.checkpoint_dir, 'checkpoint_latest.pth'))
             
     # Clean up

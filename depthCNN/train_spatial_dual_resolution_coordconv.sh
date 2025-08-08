@@ -9,9 +9,10 @@ conda activate orbslam
 
 # Check if running with DDP
 if [ -z "$1" ]; then
-    echo "Usage: $0 <num_gpus>"
+    echo "Usage: $0 <num_gpus> [resume_checkpoint]"
     echo "Example: $0 1  # Single GPU"
     echo "Example: $0 4  # 4 GPUs with DDP"
+    echo "Example: $0 4 ./checkpoints/spatial_dual_coordconv/checkpoint_latest.pth  # Resume training"
     exit 1
 fi
 
@@ -23,12 +24,16 @@ LR=1e-4
 CHECKPOINT_DIR="./checkpoints/spatial_dual_coordconv"
 LOG_DIR="./logs/spatial_dual_coordconv"
 
+# Optional resume checkpoint (second argument)
+RESUME_CHECKPOINT=$2
+
 # Adjust batch size and learning rate based on number of GPUs
 if [ $NUM_GPUS -eq 1 ]; then
     echo "Training on single GPU"
     TOTAL_BATCH_SIZE=$BATCH_SIZE
     
-    python train_spatial_dual_resolution_coordconv.py \
+    # Build command
+    CMD="python train_spatial_dual_resolution_coordconv.py \
         --data-root $DATA_ROOT \
         --batch-size $BATCH_SIZE \
         --epochs $EPOCHS \
@@ -36,7 +41,16 @@ if [ $NUM_GPUS -eq 1 ]; then
         --checkpoint-dir $CHECKPOINT_DIR \
         --log-dir $LOG_DIR \
         --num-workers 4 \
-        --save-freq 5
+        --save-freq 5"
+    
+    # Add resume if provided
+    if [ ! -z "$RESUME_CHECKPOINT" ]; then
+        echo "Resuming from checkpoint: $RESUME_CHECKPOINT"
+        CMD="$CMD --resume $RESUME_CHECKPOINT"
+    fi
+    
+    # Execute command
+    eval $CMD
         
 elif [ $NUM_GPUS -gt 1 ]; then
     echo "Training on $NUM_GPUS GPUs with DDP"
@@ -50,8 +64,8 @@ elif [ $NUM_GPUS -gt 1 ]; then
     echo "Total batch size: $TOTAL_BATCH_SIZE"
     echo "Scaled learning rate: $LR_SCALED"
     
-    # Run with torchrun (PyTorch's distributed launcher)
-    torchrun --nproc_per_node=$NUM_GPUS \
+    # Build command
+    CMD="torchrun --nproc_per_node=$NUM_GPUS \
         train_spatial_dual_resolution_coordconv.py \
         --data-root $DATA_ROOT \
         --batch-size $BATCH_SIZE \
@@ -60,7 +74,16 @@ elif [ $NUM_GPUS -gt 1 ]; then
         --checkpoint-dir $CHECKPOINT_DIR \
         --log-dir $LOG_DIR \
         --num-workers 4 \
-        --save-freq 5
+        --save-freq 5"
+    
+    # Add resume if provided
+    if [ ! -z "$RESUME_CHECKPOINT" ]; then
+        echo "Resuming from checkpoint: $RESUME_CHECKPOINT"
+        CMD="$CMD --resume $RESUME_CHECKPOINT"
+    fi
+    
+    # Execute command
+    eval $CMD
 else
     echo "Invalid number of GPUs: $NUM_GPUS"
     exit 1
