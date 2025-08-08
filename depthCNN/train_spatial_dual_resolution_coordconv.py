@@ -559,6 +559,10 @@ def main():
             model.load_state_dict(checkpoint['model'])
         optimizer.load_state_dict(checkpoint['optimizer'])
         scheduler.load_state_dict(checkpoint['scheduler'])
+        if 'model_ema' in checkpoint:
+            model_ema.load_state_dict(checkpoint['model_ema'])
+            if rank == 0:
+                print("EMA weights re-loaded")
         start_epoch = checkpoint['epoch'] + 1
         best_val_loss = checkpoint.get('best_val_loss', float('inf'))
         if rank == 0:
