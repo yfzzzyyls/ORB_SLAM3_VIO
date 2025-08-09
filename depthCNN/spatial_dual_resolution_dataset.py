@@ -8,6 +8,7 @@ import torchvision.transforms.functional as TF
 from torchvision.transforms import InterpolationMode
 from PIL import Image
 import random
+from spatial_dual_resolution_coordconv import GaussianDownsample
 
 
 class SpatialDualResolutionDataset(Dataset):
@@ -35,6 +36,9 @@ class SpatialDualResolutionDataset(Dataset):
         
         # Original image size
         self.original_size = 1408
+        
+        # Create Gaussian downsampler once in __init__ (Fix #3 - avoid per-item construction)
+        self.gaussian_downsample = GaussianDownsample(scale_factor=4)
         
         # Build file list
         self.samples = []
@@ -138,6 +142,43 @@ class SpatialDualResolutionDataset(Dataset):
             center_x += pad_l
             center_y += pad_t
         return _slice(image, center_x, center_y)
+    
+    def _extract_patch_float(self, image, gaze_x_float, gaze_y_float, patch_size):
+        """Extract patch using float coordinates with grid_sample for sub-pixel accuracy (Fix #2)."""
+        if isinstance(image, torch.Tensor):
+            # For RGB tensors
+            B = 1 if image.dim() == 3 else image.shape[0]
+            if image.dim() == 3:
+                image = image.unsqueeze(0)  # Add batch dim
+            
+            H, W = image.shape[-2:]
+            device = image.device
+            
+            # Create sampling grid for patch_size x patch_size
+            half = patch_size / 2.0
+            # Grid in pixel coordinates
+            y_coords = torch.linspace(-half + 0.5, half - 0.5, patch_size, device=device)
+            x_coords = torch.linspace(-half + 0.5, half - 0.5, patch_size, device=device)
+            grid_y, grid_x = torch.meshgrid(y_coords, x_coords, indexing='ij')
+            
+            # Add gaze offset and normalize to [-1, 1] with align_corners=False convention
+            # FIX: Use (coord + 0.5) / size normalization for align_corners=False
+            grid_x = 2.0 * (grid_x + gaze_x_float + 0.5) / self.original_size - 1.0
+            grid_y = 2.0 * (grid_y + gaze_y_float + 0.5) / self.original_size - 1.0
+            
+            # Stack for grid_sample [1, H, W, 2]
+            grid = torch.stack([grid_x, grid_y], dim=-1).unsqueeze(0)
+            
+            # Sample with reflection padding, align_corners=False for consistency
+            patch = F.grid_sample(image, grid, mode='bilinear', 
+                                padding_mode='reflection', align_corners=False)
+            
+            return patch.squeeze(0) if B == 1 else patch
+        else:
+            # For numpy depth - convert to tensor, process, convert back
+            depth_tensor = torch.from_numpy(image).unsqueeze(0).unsqueeze(0).float()
+            patch_tensor = self._extract_patch_float(depth_tensor, gaze_x_float, gaze_y_float, patch_size)
+            return patch_tensor.squeeze(0).squeeze(0).numpy()
             
     def __getitem__(self, idx):
         sample = self.samples[idx]
@@ -178,11 +219,11 @@ class SpatialDualResolutionDataset(Dataset):
         context_rgb = TF.resize(rgb_tensor, [self.context_size, self.context_size], 
                                interpolation=InterpolationMode.BILINEAR)
         
-        # Create patch: extract high-res crop at gaze
-        patch_rgb = self._extract_patch(rgb_tensor, int(gaze_x), int(gaze_y), self.patch_size)
+        # Create patch: extract high-res crop at gaze using FLOAT coordinates (Fix #2)
+        patch_rgb = self._extract_patch_float(rgb_tensor, gaze_x, gaze_y, self.patch_size)
         
-        # Extract GT depth patch (88x88) then downsample to output size
-        depth_patch_88 = self._extract_patch(depth, int(gaze_x), int(gaze_y), self.patch_size)
+        # Extract GT depth patch (88x88) using FLOAT coordinates (Fix #2)
+        depth_patch_88 = self._extract_patch_float(depth, gaze_x, gaze_y, self.patch_size)
         # Ensure contiguous array before converting to tensor
         if not depth_patch_88.flags['C_CONTIGUOUS']:
             depth_patch_88 = depth_patch_88.copy()
@@ -191,17 +232,58 @@ class SpatialDualResolutionDataset(Dataset):
         # Create mask before downsampling
         mask_88 = (depth_patch > 0).float()
         
-        # Downsample mask and depth separately to avoid mixing invalid pixels
-        mask_22 = F.avg_pool2d(mask_88, kernel_size=4, stride=4)  # 88 -> 22
-        depth_sum = F.avg_pool2d(depth_patch * mask_88, kernel_size=4, stride=4)
-        depth_output = depth_sum / (mask_22 + 1e-6)  # Avoid division by zero
+        # Use Gaussian downsampling instead of box average (Fix #5)
+        # Now using self.gaussian_downsample created in __init__
         
-        # Create valid mask (consider valid if > 50% of pixels in 4x4 region were valid)
-        valid_mask = (mask_22 > 0.5).float()
+        # Downsample depth with mask weighting
+        # FIX: Ensure 4D tensor for GaussianDownsample [B, C, H, W]
+        depth_weighted = depth_patch * mask_88
+        # depth_patch is already [1, 88, 88], need to add batch dim for downsampler
+        if depth_weighted.dim() == 3:
+            depth_weighted = depth_weighted.unsqueeze(0)  # [1, 1, 88, 88]
+            mask_88_4d = mask_88.unsqueeze(0)  # [1, 1, 88, 88]
+        else:
+            mask_88_4d = mask_88
+            
+        depth_22_weighted = self.gaussian_downsample(depth_weighted)  # [1, 1, 22, 22]
+        mask_22 = self.gaussian_downsample(mask_88_4d)  # [1, 1, 22, 22]
         
-        # Normalize gaze coordinates to [-1, 1]
-        gaze_x_norm = (gaze_x / (self.original_size - 1)) * 2 - 1
-        gaze_y_norm = (gaze_y / (self.original_size - 1)) * 2 - 1
+        # Remove batch dim if added
+        if depth_22_weighted.shape[0] == 1:
+            depth_22_weighted = depth_22_weighted.squeeze(0)  # [1, 22, 22]
+            mask_22 = mask_22.squeeze(0)  # [1, 22, 22]
+            
+        depth_output = depth_22_weighted / (mask_22 + 1e-6)
+        
+        # Create valid mask (consider valid if > 25% of Gaussian support was valid)
+        valid_mask = (mask_22 > 0.25).float()
+        
+        # NEW: Get scalar gaze depth at exact float coordinates (Fix #1)
+        # Bilinear sample the original full-resolution depth
+        depth_full_tensor = torch.from_numpy(depth).unsqueeze(0).unsqueeze(0).float()
+        # Create a single-point grid at gaze location with align_corners=False convention
+        gaze_x_norm_temp = 2.0 * (gaze_x + 0.5) / self.original_size - 1.0
+        gaze_y_norm_temp = 2.0 * (gaze_y + 0.5) / self.original_size - 1.0
+        gaze_grid = torch.tensor([[[[gaze_x_norm_temp, gaze_y_norm_temp]]]], dtype=torch.float32)
+        
+        # Sample depth at exact gaze point (use reflection padding for consistency)
+        gaze_depth_sample = F.grid_sample(depth_full_tensor, gaze_grid, 
+                                         mode='bilinear', padding_mode='reflection', 
+                                         align_corners=False)
+        gaze_depth_gt = gaze_depth_sample.squeeze().item()
+        
+        # FIX: Check validity using bilinear sampled mask, not nearest pixel
+        valid_map = torch.from_numpy((depth > 0).astype(np.float32)).unsqueeze(0).unsqueeze(0)
+        gaze_valid_sample = F.grid_sample(valid_map, gaze_grid,
+                                         mode='bilinear', padding_mode='reflection',
+                                         align_corners=False)
+        gaze_is_valid = gaze_valid_sample.squeeze().item() > 0.5
+        if not gaze_is_valid:
+            gaze_depth_gt = 0.0
+        
+        # Normalize gaze coordinates to [-1, 1] with align_corners=False convention
+        gaze_x_norm = 2.0 * (gaze_x + 0.5) / self.original_size - 1.0
+        gaze_y_norm = 2.0 * (gaze_y + 0.5) / self.original_size - 1.0
         
         return {
             'context_rgb': context_rgb,
@@ -210,6 +292,7 @@ class SpatialDualResolutionDataset(Dataset):
             'valid_mask': valid_mask.squeeze(0),
             'gaze_x': torch.tensor(gaze_x_norm, dtype=torch.float32),
             'gaze_y': torch.tensor(gaze_y_norm, dtype=torch.float32),
+            'gaze_depth_gt': torch.tensor(gaze_depth_gt, dtype=torch.float32),  # NEW: scalar gaze GT
             'seq': sample['seq'],
             'frame_id': sample['frame_id']
         }
@@ -230,6 +313,7 @@ def custom_collate_fn(batch):
     valid_mask = torch.stack([s['valid_mask'] for s in batch])
     gaze_x = torch.stack([s['gaze_x'] for s in batch])
     gaze_y = torch.stack([s['gaze_y'] for s in batch])
+    gaze_depth_gt = torch.stack([s['gaze_depth_gt'] for s in batch])  # NEW
     
     # Keep metadata as lists
     seqs = [s['seq'] for s in batch]
@@ -242,6 +326,7 @@ def custom_collate_fn(batch):
         'valid_mask': valid_mask,
         'gaze_x': gaze_x,
         'gaze_y': gaze_y,
+        'gaze_depth_gt': gaze_depth_gt,  # NEW
         'seqs': seqs,
         'frame_ids': frame_ids
     }

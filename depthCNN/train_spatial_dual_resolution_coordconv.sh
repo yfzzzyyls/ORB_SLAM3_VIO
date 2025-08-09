@@ -4,8 +4,7 @@
 # Supports both single-GPU and multi-GPU training
 
 # Activate conda environment
-source ~/miniconda3/bin/activate
-conda activate orbslam
+source ~/miniconda3/bin/activate orbslam
 
 # Check if running with DDP
 if [ -z "$1" ]; then

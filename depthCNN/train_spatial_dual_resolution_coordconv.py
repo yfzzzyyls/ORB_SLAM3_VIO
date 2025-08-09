@@ -228,8 +228,11 @@ def train_epoch(model, train_loader, optimizer, scheduler, loss_fns, epoch,
         gaze_x = batch['gaze_x'].cuda(non_blocking=True)
         gaze_y = batch['gaze_y'].cuda(non_blocking=True)
         
-        # Forward pass
-        pred_depth, log_sigma = model(context_rgb, patch_rgb, gaze_x, gaze_y)
+        # Forward pass - now returns 3 outputs (Fix #1)
+        pred_depth, log_sigma, pred_gaze_depth = model(context_rgb, patch_rgb, gaze_x, gaze_y)
+        
+        # Get gaze depth GT from batch
+        gaze_depth_gt = batch['gaze_depth_gt'].cuda(non_blocking=True)
         
         # Compute losses
         si_log_loss = si_log_loss_fn(pred_depth.squeeze(1), depth_gt, valid_mask)
@@ -243,8 +246,30 @@ def train_epoch(model, train_loader, optimizer, scheduler, loss_fns, epoch,
         heteroscedastic_loss = 0.5 * torch.exp(-2 * log_sigma) * (residual**2) + log_sigma
         heteroscedastic_loss = heteroscedastic_loss[valid_mask > 0].mean()
         
-        # Total loss
-        loss = si_log_loss + 0.1 * berhu_loss + 0.01 * smooth_loss + 0.1 * heteroscedastic_loss
+        # NEW: Gaussian-weighted center loss (Fix #4)
+        if hasattr(model, 'module'):  # DDP wrapper
+            gaze_weights = model.module.gaze_weights.to(pred_depth.device)
+        else:
+            gaze_weights = model.gaze_weights.to(pred_depth.device)
+        
+        # Apply weights with valid mask
+        w = gaze_weights.unsqueeze(0) * valid_mask  # [B, 22, 22]
+        w = w / (w.sum(dim=(-1,-2), keepdim=True) + 1e-6)  # Renormalize
+        center_loss = ((pred_depth.squeeze(1) - depth_gt)**2 * w).sum(dim=(-1,-2)).mean()
+        
+        # NEW: Scalar gaze depth loss (Fix #1)
+        # Only compute loss for valid gaze points
+        gaze_valid = (gaze_depth_gt > 0).float()
+        if gaze_valid.sum() > 0:
+            # Squeeze pred_gaze_depth to match gaze_depth_gt shape
+            gaze_loss = F.l1_loss(pred_gaze_depth.squeeze(-1)[gaze_valid > 0], 
+                                 gaze_depth_gt[gaze_valid > 0], reduction='mean')
+        else:
+            gaze_loss = torch.tensor(0.0, device=pred_depth.device)
+        
+        # Total loss with new terms
+        loss = si_log_loss + 0.1 * berhu_loss + 0.01 * smooth_loss + 0.1 * heteroscedastic_loss + \
+               0.2 * center_loss + 0.5 * gaze_loss
         
         # Backward pass
         optimizer.zero_grad()
@@ -345,8 +370,11 @@ def validate(model, val_loader, loss_fns, epoch, writer, distributed, rank, worl
             gaze_x = batch['gaze_x'].cuda(non_blocking=True)
             gaze_y = batch['gaze_y'].cuda(non_blocking=True)
             
-            # Forward pass
-            pred_depth, log_sigma = model(context_rgb, patch_rgb, gaze_x, gaze_y)
+            # Forward pass - now returns 3 outputs (Fix #1)
+            pred_depth, log_sigma, pred_gaze_depth = model(context_rgb, patch_rgb, gaze_x, gaze_y)
+            
+            # Get gaze depth GT from batch
+            gaze_depth_gt = batch['gaze_depth_gt'].cuda(non_blocking=True)
             
             # Compute losses
             si_log_loss = si_log_loss_fn(pred_depth.squeeze(1), depth_gt, valid_mask)
@@ -359,8 +387,30 @@ def validate(model, val_loader, loss_fns, epoch, writer, distributed, rank, worl
             heteroscedastic_loss = 0.5 * torch.exp(-2 * log_sigma) * (residual**2) + log_sigma
             heteroscedastic_loss = heteroscedastic_loss[valid_mask > 0].mean()
             
-            # Total loss
-            loss = si_log_loss + 0.1 * berhu_loss + 0.01 * smooth_loss + 0.1 * heteroscedastic_loss
+            # NEW: Gaussian-weighted center loss (Fix #4)
+            if hasattr(model, 'module'):  # DDP wrapper
+                gaze_weights = model.module.gaze_weights.to(pred_depth.device)
+            else:
+                gaze_weights = model.gaze_weights.to(pred_depth.device)
+            
+            # Apply weights with valid mask
+            w = gaze_weights.unsqueeze(0) * valid_mask  # [B, 22, 22]
+            w = w / (w.sum(dim=(-1,-2), keepdim=True) + 1e-6)  # Renormalize
+            center_loss = ((pred_depth.squeeze(1) - depth_gt)**2 * w).sum(dim=(-1,-2)).mean()
+            
+            # NEW: Scalar gaze depth loss (Fix #1)
+            # Only compute loss for valid gaze points
+            gaze_valid = (gaze_depth_gt > 0).float()
+            if gaze_valid.sum() > 0:
+                # Squeeze pred_gaze_depth to match gaze_depth_gt shape
+                gaze_loss = F.l1_loss(pred_gaze_depth.squeeze(-1)[gaze_valid > 0], 
+                                     gaze_depth_gt[gaze_valid > 0], reduction='mean')
+            else:
+                gaze_loss = torch.tensor(0.0, device=pred_depth.device)
+            
+            # Total loss with new terms
+            loss = si_log_loss + 0.1 * berhu_loss + 0.01 * smooth_loss + 0.1 * heteroscedastic_loss + \
+                   0.2 * center_loss + 0.5 * gaze_loss
             
             # Compute metrics
             metrics = compute_metrics(pred_depth.squeeze(1), depth_gt, valid_mask)

@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import math
 
 
 class BlurPool(nn.Module):
@@ -15,6 +16,60 @@ class BlurPool(nn.Module):
 
     def forward(self, x):
         return F.conv2d(x, self.kernel, stride=self.stride, padding=2, groups=x.size(1))
+
+
+class GaussianDownsample(nn.Module):
+    """Gaussian downsampling for depth targets - replaces box average (Fix #5)."""
+    def __init__(self, scale_factor=4):
+        super().__init__()
+        self.scale_factor = scale_factor
+        
+        # Create Gaussian kernel
+        sigma = scale_factor / 2.0
+        kernel_size = 2 * scale_factor + 1
+        kernel = self._gaussian_kernel(kernel_size, sigma)
+        self.register_buffer('kernel', kernel)
+        
+    def _gaussian_kernel(self, size, sigma):
+        """Create 2D Gaussian kernel."""
+        coords = torch.arange(size, dtype=torch.float32)
+        coords -= (size - 1) / 2.0
+        
+        g = torch.exp(-(coords**2) / (2 * sigma**2))
+        g /= g.sum()
+        
+        kernel = g.unsqueeze(0) * g.unsqueeze(1)
+        kernel = kernel / kernel.sum()
+        return kernel.unsqueeze(0).unsqueeze(0)
+        
+    def forward(self, x):
+        """Apply Gaussian downsampling."""
+        B, C, H, W = x.shape
+        assert H % self.scale_factor == 0 and W % self.scale_factor == 0
+        
+        # Apply Gaussian filter
+        padding = self.kernel.shape[-1] // 2
+        x_filtered = F.conv2d(x, self.kernel.repeat(C, 1, 1, 1), 
+                              padding=padding, groups=C)
+        
+        # Subsample
+        return x_filtered[:, :, ::self.scale_factor, ::self.scale_factor]
+
+
+def create_gaussian_weight_map(size=22, sigma=3.0):
+    """Create Gaussian weight map centered at (size//2, size//2) for loss weighting (Fix #4)."""
+    center = size / 2.0 - 0.5  # Center of 22x22 grid
+    y, x = torch.meshgrid(torch.arange(size, dtype=torch.float32),
+                          torch.arange(size, dtype=torch.float32), 
+                          indexing='ij')
+    
+    # Distance from center
+    dist_sq = (x - center)**2 + (y - center)**2
+    weights = torch.exp(-dist_sq / (2 * sigma**2))
+    
+    # Normalize so sum = 1
+    weights = weights / weights.sum()
+    return weights
 
 
 class FiLMLayer(nn.Module):
@@ -107,6 +162,20 @@ class SpatialDualResolutionGazeDepth(nn.Module):
         # Uncertainty prediction
         self.uncertainty_conv = nn.Conv2d(48, 1, kernel_size=1)
         
+        # NEW: Scalar gaze depth head (Fix #1)
+        self.gaze_head = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),  # Global pool the features
+            nn.Conv2d(48, 24, 1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(24, 1, 1)  # Output scalar depth
+        )
+        
+        # NEW: Register Gaussian weight map for loss (Fix #4)
+        self.register_buffer('gaze_weights', create_gaussian_weight_map(22, sigma=3.0))
+        
+        # NEW: Gaussian downsampler for targets (Fix #5)
+        self.gaussian_downsample = GaussianDownsample(scale_factor=4)
+        
         # Initialize weights
         self._init_weights()
         
@@ -139,8 +208,8 @@ class SpatialDualResolutionGazeDepth(nn.Module):
         
     def create_gaze_heatmap(self, gaze_x, gaze_y, height, width, device, sigma_px=2.5):
         """Create Gaussian heatmap at gaze location."""
-        # convert pixel sigma to normalized units in [-1, 1]
-        sigma = (2.0 * sigma_px) / (max(height, width) - 1)
+        # convert pixel sigma to normalized units in [-1, 1] with align_corners=False
+        sigma = (2.0 * sigma_px) / max(height, width)
         # gaze_x, gaze_y are in normalized coordinates [-1, 1]
         y_coords = torch.linspace(-1, 1, height, device=device)
         x_coords = torch.linspace(-1, 1, width, device=device)
@@ -167,9 +236,9 @@ class SpatialDualResolutionGazeDepth(nn.Module):
         B, C, H, W = ctx_44.shape  # H=W=44
         device = ctx_44.device
 
-        # 1) Map normalized gaze [-1,1] -> original pixels
-        cx = ((gaze_x + 1.0) * 0.5) * (img_size - 1)
-        cy = ((gaze_y + 1.0) * 0.5) * (img_size - 1)
+        # 1) Map normalized gaze [-1,1] -> original pixels with align_corners=False
+        cx = ((gaze_x + 1.0) * 0.5) * img_size - 0.5
+        cy = ((gaze_y + 1.0) * 0.5) * img_size - 0.5
 
         # 2) ROI bounds in original pixels (fractional is fine)
         half = patch_size / 2.0
@@ -185,19 +254,24 @@ class SpatialDualResolutionGazeDepth(nn.Module):
         x2f = x2 * scale
         y2f = y2 * scale
 
-        # 4) Build sampling grid for 22x22 crop
-        ys = torch.linspace(0, 1, steps=22, device=device).view(1, 22, 1).expand(B, -1, 22)
-        xs = torch.linspace(0, 1, steps=22, device=device).view(1, 1, 22).expand(B, 22, -1)
-        x = x1f.view(B, 1, 1) * (1 - xs) + x2f.view(B, 1, 1) * xs
-        y = y1f.view(B, 1, 1) * (1 - ys) + y2f.view(B, 1, 1) * ys
+        # 4) Build sampling grid for 22x22 crop at BIN CENTERS (align_corners=False)
+        # Sample at centers, not endpoints, to match dataset
+        i = torch.arange(22, device=device, dtype=torch.float32)
+        x = x1f[:, None, None] + (i + 0.5)[None, None, :] * (x2f - x1f)[:, None, None] / 22
+        y = y1f[:, None, None] + (i + 0.5)[None, :, None] * (y2f - y1f)[:, None, None] / 22
+        
+        # Expand to [B, 22, 22]
+        x = x.expand(-1, 22, -1)
+        y = y.expand(-1, -1, 22)
 
-        # Normalize to [-1,1] for grid_sample with align_corners=True
-        xn = 2.0 * (x / (W - 1)) - 1.0
-        yn = 2.0 * (y / (H - 1)) - 1.0
+        # Normalize to [-1,1] for grid_sample with align_corners=False
+        # x and y are bin centers in feature space, normalize with +0.5
+        xn = 2.0 * (x + 0.5) / W - 1.0
+        yn = 2.0 * (y + 0.5) / H - 1.0
         grid = torch.stack([xn, yn], dim=-1)  # [B, 22, 22, 2]
 
         # 5) Sample with reflection padding to match dataset patch behavior
-        return F.grid_sample(ctx_44, grid, mode='bilinear', align_corners=True, padding_mode='reflection')
+        return F.grid_sample(ctx_44, grid, mode='bilinear', align_corners=False, padding_mode='reflection')
         
     def forward(self, context_rgb, patch_rgb, gaze_x, gaze_y):
         B = context_rgb.shape[0]
@@ -258,9 +332,9 @@ class SpatialDualResolutionGazeDepth(nn.Module):
         
         # Lightweight decoder at 22x22 only
         d_dw = self.decode_dw(fused)
-        d = F.relu(self.decode_gn(self.decode_pw(d_dw)))  # [B, 64, 22, 22]
+        d = F.relu(self.decode_gn(self.decode_pw(d_dw)))  # [B, 96, 22, 22]
         d = self.head_dropout(d)  # Apply dropout before final layers
-        d_final = self.decode_final(d)  # [B, 32, 22, 22]
+        d_final = self.decode_final(d)  # [B, 48, 22, 22]
         
         # Final predictions at 22x22
         depth = self.pred_conv(d_final)
@@ -268,7 +342,11 @@ class SpatialDualResolutionGazeDepth(nn.Module):
         
         log_sigma = self.uncertainty_conv(d_final)  # Output log(sigma) directly
         
-        return depth, log_sigma
+        # NEW: Scalar gaze depth prediction (Fix #1)
+        gaze_depth = self.gaze_head(d_final)  # [B, 1, 1, 1]
+        gaze_depth = F.softplus(gaze_depth.squeeze(-1).squeeze(-1)) + 0.1  # [B, 1]
+        
+        return depth, log_sigma, gaze_depth
 
 
 if __name__ == '__main__':
@@ -288,8 +366,16 @@ if __name__ == '__main__':
     gaze_x = torch.rand(B) * 2 - 1  # [-1, 1]
     gaze_y = torch.rand(B) * 2 - 1  # [-1, 1]
     
-    depth, uncertainty = model(context_rgb, patch_rgb, gaze_x, gaze_y)
+    depth, uncertainty, gaze_depth = model(context_rgb, patch_rgb, gaze_x, gaze_y)
     print(f"Depth shape: {depth.shape}")  # Should be [2, 1, 22, 22]
     print(f"Uncertainty shape: {uncertainty.shape}")  # Should be [2, 1, 22, 22]
+    print(f"Gaze depth shape: {gaze_depth.shape}")  # Should be [2, 1]
     print(f"Depth range: [{depth.min():.3f}, {depth.max():.3f}]")
+    print(f"Gaze depth: {gaze_depth}")
+    
+    # Test Gaussian downsampling
+    test_depth = torch.randn(2, 1, 88, 88).abs()
+    downsampler = GaussianDownsample(scale_factor=4)
+    downsampled = downsampler(test_depth)
+    print(f"Downsampled shape: {downsampled.shape}")  # Should be [2, 1, 22, 22]
     print(f"Uncertainty range: [{uncertainty.min():.3f}, {uncertainty.max():.3f}]")
