@@ -101,6 +101,56 @@ class EdgeAwareSmoothLoss(nn.Module):
         return loss_x + loss_y
 
 
+class GradientConsistencyLoss(nn.Module):
+    """Gradient consistency loss for sharper depth edges (Sobel-like)."""
+    def __init__(self):
+        super().__init__()
+        
+    def forward(self, pred, target, image, valid_mask):
+        """
+        Args:
+            pred: predicted depth [B, 1, H, W]
+            target: ground truth depth [B, H, W]
+            image: RGB image [B, 3, H', W']
+            valid_mask: valid depth mask [B, H, W]
+        """
+        # Ensure same resolution
+        if image.shape[-2:] != pred.shape[-2:]:
+            image = F.interpolate(image, size=pred.shape[-2:], mode='bilinear', align_corners=False)
+        
+        target = target.unsqueeze(1)  # [B, 1, H, W]
+        valid_mask = valid_mask.unsqueeze(1)  # [B, 1, H, W]
+        
+        # Sobel-like central difference for better edge detection
+        if pred.shape[-1] > 2 and pred.shape[-2] > 2:
+            # Depth gradients (central difference)
+            grad_pred_x = pred[:, :, :, 2:] - pred[:, :, :, :-2]  # [B, 1, H, W-2]
+            grad_pred_y = pred[:, :, 2:, :] - pred[:, :, :-2, :]  # [B, 1, H-2, W]
+            
+            grad_target_x = target[:, :, :, 2:] - target[:, :, :, :-2]
+            grad_target_y = target[:, :, 2:, :] - target[:, :, :-2, :]
+            
+            # Valid masks for gradients
+            valid_x = valid_mask[:, :, :, 1:-1] * valid_mask[:, :, :, 2:] * valid_mask[:, :, :, :-2]
+            valid_y = valid_mask[:, :, 1:-1, :] * valid_mask[:, :, 2:, :] * valid_mask[:, :, :-2, :]
+            
+            # Image gradients for edge-aware weighting
+            img_grad_x = (image[:, :, :, 2:] - image[:, :, :, :-2]).abs().mean(1, keepdim=True)
+            img_grad_y = (image[:, :, 2:, :] - image[:, :, :-2, :]).abs().mean(1, keepdim=True)
+            
+            # Edge-aware weights (high weight where image has low gradient = smooth regions)
+            weight_x = torch.exp(-10 * img_grad_x) * valid_x
+            weight_y = torch.exp(-10 * img_grad_y) * valid_y
+            
+            # Gradient consistency loss
+            loss_x = ((grad_pred_x - grad_target_x).abs() * weight_x).sum() / (weight_x.sum() + 1e-6)
+            loss_y = ((grad_pred_y - grad_target_y).abs() * weight_y).sum() / (weight_y.sum() + 1e-6)
+            
+            return loss_x + loss_y
+        else:
+            return torch.tensor(0.0, device=pred.device)
+
+
 def setup_distributed():
     """Setup distributed training."""
     if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
@@ -205,7 +255,7 @@ def train_epoch(model, train_loader, optimizer, scheduler, loss_fns, epoch,
     """Train for one epoch."""
     model.train()
     
-    si_log_loss_fn, berhu_loss_fn, smooth_loss_fn = loss_fns
+    si_log_loss_fn, berhu_loss_fn, smooth_loss_fn, grad_consistency_loss_fn = loss_fns
     
     total_loss = 0
     total_samples = 0
@@ -238,6 +288,7 @@ def train_epoch(model, train_loader, optimizer, scheduler, loss_fns, epoch,
         si_log_loss = si_log_loss_fn(pred_depth.squeeze(1), depth_gt, valid_mask)
         berhu_loss = berhu_loss_fn(pred_depth.squeeze(1), depth_gt, valid_mask)
         smooth_loss = smooth_loss_fn(pred_depth, patch_rgb)
+        grad_consistency = grad_consistency_loss_fn(pred_depth, depth_gt, patch_rgb, valid_mask)
         
         # Heteroscedastic uncertainty loss with log_sigma
         log_sigma = log_sigma.squeeze(1).clamp(-8, 8)
@@ -267,9 +318,9 @@ def train_epoch(model, train_loader, optimizer, scheduler, loss_fns, epoch,
         else:
             gaze_loss = torch.tensor(0.0, device=pred_depth.device)
         
-        # Total loss with new terms
+        # Total loss with new terms (added gradient consistency with weight 0.05)
         loss = si_log_loss + 0.1 * berhu_loss + 0.01 * smooth_loss + 0.1 * heteroscedastic_loss + \
-               0.2 * center_loss + 0.5 * gaze_loss
+               0.2 * center_loss + 0.5 * gaze_loss + 0.05 * grad_consistency
         
         # Backward pass
         optimizer.zero_grad()
@@ -342,11 +393,11 @@ def train_epoch(model, train_loader, optimizer, scheduler, loss_fns, epoch,
     return avg_loss, avg_metrics
 
 
-def validate(model, val_loader, loss_fns, epoch, writer, distributed, rank, world_size):
-    """Validate the model."""
+def validate(model, val_loader, loss_fns, epoch, writer, distributed, rank, world_size, use_tta=False):
+    """Validate the model with optional test-time augmentation."""
     model.eval()
     
-    si_log_loss_fn, berhu_loss_fn, smooth_loss_fn = loss_fns
+    si_log_loss_fn, berhu_loss_fn, smooth_loss_fn, grad_consistency_loss_fn = loss_fns
     
     total_loss = 0
     total_samples = 0
@@ -370,8 +421,27 @@ def validate(model, val_loader, loss_fns, epoch, writer, distributed, rank, worl
             gaze_x = batch['gaze_x'].cuda(non_blocking=True)
             gaze_y = batch['gaze_y'].cuda(non_blocking=True)
             
-            # Forward pass - now returns 3 outputs (Fix #1)
-            pred_depth, log_sigma, pred_gaze_depth = model(context_rgb, patch_rgb, gaze_x, gaze_y)
+            # Forward pass with optional TTA
+            if use_tta:
+                # Original prediction
+                pred_depth, log_sigma, pred_gaze_depth = model(context_rgb, patch_rgb, gaze_x, gaze_y)
+                
+                # Flipped prediction
+                context_rgb_flip = torch.flip(context_rgb, dims=[-1])
+                patch_rgb_flip = torch.flip(patch_rgb, dims=[-1])
+                gaze_x_flip = -gaze_x  # Flip gaze x coordinate
+                
+                pred_depth_flip, log_sigma_flip, pred_gaze_depth_flip = model(
+                    context_rgb_flip, patch_rgb_flip, gaze_x_flip, gaze_y
+                )
+                
+                # Average predictions (flip back the flipped prediction)
+                pred_depth = (pred_depth + torch.flip(pred_depth_flip, dims=[-1])) / 2
+                log_sigma = (log_sigma + torch.flip(log_sigma_flip, dims=[-1])) / 2
+                pred_gaze_depth = (pred_gaze_depth + pred_gaze_depth_flip) / 2
+            else:
+                # Standard forward pass
+                pred_depth, log_sigma, pred_gaze_depth = model(context_rgb, patch_rgb, gaze_x, gaze_y)
             
             # Get gaze depth GT from batch
             gaze_depth_gt = batch['gaze_depth_gt'].cuda(non_blocking=True)
@@ -380,6 +450,7 @@ def validate(model, val_loader, loss_fns, epoch, writer, distributed, rank, worl
             si_log_loss = si_log_loss_fn(pred_depth.squeeze(1), depth_gt, valid_mask)
             berhu_loss = berhu_loss_fn(pred_depth.squeeze(1), depth_gt, valid_mask)
             smooth_loss = smooth_loss_fn(pred_depth, patch_rgb)
+            grad_consistency = grad_consistency_loss_fn(pred_depth, depth_gt, patch_rgb, valid_mask)
             
             # Heteroscedastic uncertainty loss with log_sigma
             log_sigma = log_sigma.squeeze(1).clamp(-8, 8)
@@ -408,9 +479,9 @@ def validate(model, val_loader, loss_fns, epoch, writer, distributed, rank, worl
             else:
                 gaze_loss = torch.tensor(0.0, device=pred_depth.device)
             
-            # Total loss with new terms
+            # Total loss with new terms (added gradient consistency with weight 0.05)
             loss = si_log_loss + 0.1 * berhu_loss + 0.01 * smooth_loss + 0.1 * heteroscedastic_loss + \
-                   0.2 * center_loss + 0.5 * gaze_loss
+                   0.2 * center_loss + 0.5 * gaze_loss + 0.05 * grad_consistency
             
             # Compute metrics
             metrics = compute_metrics(pred_depth.squeeze(1), depth_gt, valid_mask)
@@ -492,6 +563,15 @@ def main():
                        help='Maximum number of validation sequences to use')
     parser.add_argument('--random-seed', type=int, default=42,
                        help='Random seed for sequence selection')
+    parser.add_argument('--scheduler', type=str, default='cosine_restarts',
+                       choices=['cosine_restarts', 'plateau', 'onecycle'],
+                       help='Learning rate scheduler type')
+    parser.add_argument('--use-swa', action='store_true',
+                       help='Use Stochastic Weight Averaging for last 20 epochs')
+    parser.add_argument('--swa-start', type=int, default=80,
+                       help='Epoch to start SWA')
+    parser.add_argument('--swa-lr', type=float, default=5e-5,
+                       help='SWA learning rate')
     
     args = parser.parse_args()
     
@@ -508,7 +588,7 @@ def main():
     model = model.cuda()
     
     if distributed:
-        model = DDP(model, device_ids=[gpu], find_unused_parameters=False)
+        model = DDP(model, device_ids=[gpu])
         
     # Create datasets
     train_dataset = SpatialDualResolutionDataset(
@@ -562,19 +642,30 @@ def main():
     param_groups = add_weight_decay(target_for_groups, wd=args.weight_decay)
     optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.999))
     
-    # Create warm-up + cosine scheduler
+    # Choose scheduler based on args (default to cosine warm restarts for plateau breaking)
     warmup_epochs = 5
-    cosine_epochs = args.epochs - warmup_epochs
     
-    warmup = torch.optim.lr_scheduler.LinearLR(
-        optimizer, start_factor=0.01, end_factor=1.0, total_iters=warmup_epochs
-    )
-    cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=cosine_epochs, eta_min=1e-6
-    )
-    scheduler = torch.optim.lr_scheduler.SequentialLR(
-        optimizer, schedulers=[warmup, cosine], milestones=[warmup_epochs]
-    )
+    if getattr(args, 'scheduler', 'cosine_restarts') == 'plateau':
+        # Option 1: ReduceLROnPlateau (monitors EMA val loss)
+        warmup = torch.optim.lr_scheduler.LinearLR(
+            optimizer, start_factor=0.01, end_factor=1.0, total_iters=warmup_epochs
+        )
+        # After warmup, we'll switch to ReduceLROnPlateau
+        scheduler = warmup
+        use_plateau_scheduler = False  # Will switch after warmup
+    else:
+        # Option 2: CosineAnnealingWarmRestarts (recommended for plateaus)
+        warmup = torch.optim.lr_scheduler.LinearLR(
+            optimizer, start_factor=0.01, end_factor=1.0, total_iters=warmup_epochs
+        )
+        # Restart every 10 epochs after warmup
+        cosine_restarts = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            optimizer, T_0=10, T_mult=1, eta_min=1e-6
+        )
+        scheduler = torch.optim.lr_scheduler.SequentialLR(
+            optimizer, schedulers=[warmup, cosine_restarts], milestones=[warmup_epochs]
+        )
+        use_plateau_scheduler = False
     
     # Create EMA model
     ema_decay = 0.999  # Can be tuned (0.999-0.9995)
@@ -585,11 +676,24 @@ def main():
     for p in model_ema.parameters():
         p.requires_grad_(False)
     
+    # Setup SWA if requested
+    swa_model = None
+    swa_scheduler = None
+    swa_n = 0
+    if args.use_swa:
+        from torch.optim.swa_utils import AveragedModel, SWALR
+        if isinstance(model, DDP):
+            swa_model = AveragedModel(model.module)
+        else:
+            swa_model = AveragedModel(model)
+        swa_scheduler = SWALR(optimizer, swa_lr=args.swa_lr, anneal_epochs=5)
+    
     # Create loss functions
     si_log_loss = SILogLoss(alpha=0.85)
     berhu_loss = BerHuLoss(threshold=0.2)
     smooth_loss = EdgeAwareSmoothLoss()
-    loss_fns = (si_log_loss, berhu_loss, smooth_loss)
+    grad_consistency_loss = GradientConsistencyLoss()
+    loss_fns = (si_log_loss, berhu_loss, smooth_loss, grad_consistency_loss)
     
     # Create tensorboard writer
     if rank == 0:
@@ -622,25 +726,55 @@ def main():
     for epoch in range(start_epoch, args.epochs):
         if distributed:
             train_sampler.set_epoch(epoch)
+        
+        # Check if we should switch to SWA
+        if args.use_swa and epoch >= args.swa_start:
+            if swa_n == 0 and rank == 0:
+                print(f"\n🔄 Starting SWA at epoch {epoch}")
+            # Use SWA scheduler
+            current_scheduler = swa_scheduler
+        else:
+            current_scheduler = scheduler
             
         # Train
         train_loss, train_metrics = train_epoch(
-            model, train_loader, optimizer, scheduler, loss_fns,
+            model, train_loader, optimizer, current_scheduler, loss_fns,
             epoch, writer, distributed, rank, world_size,
             model_ema=model_ema, ema_decay=ema_decay
         )
         
+        # Update SWA model if in SWA phase
+        if args.use_swa and epoch >= args.swa_start:
+            swa_model.update_parameters(model)
+            swa_n += 1
+        
+        # Use TTA for validation after epoch 50
+        use_tta = (epoch >= 50)
+        
         # Validate regular model
         val_loss, val_metrics = validate(
             model, val_loader, loss_fns, epoch, writer,
-            distributed, rank, world_size
+            distributed, rank, world_size, use_tta=use_tta
         )
         
         # Validate EMA model
         ema_val_loss, ema_val_metrics = validate(
             model_ema, val_loader, loss_fns, epoch, writer,
-            distributed, rank, world_size
+            distributed, rank, world_size, use_tta=use_tta
         )
+        
+        # Also validate SWA model if available
+        if swa_n > 0:
+            from torch.optim.swa_utils import update_bn
+            # Update batch norm statistics
+            update_bn(val_loader, swa_model)
+            swa_val_loss, swa_val_metrics = validate(
+                swa_model, val_loader, loss_fns, epoch, writer,
+                distributed, rank, world_size, use_tta=use_tta
+            )
+            if rank == 0:
+                print(f"  SWA Val Loss: {swa_val_loss:.4f}, AbsRel: {swa_val_metrics['abs_rel']:.3f}, "
+                      f"RMSE: {swa_val_metrics['rmse']:.3f}, a1: {swa_val_metrics['a1']:.3f}")
         
         # Print epoch summary
         if rank == 0:

@@ -4,6 +4,175 @@ import torch.nn.functional as F
 import math
 
 
+class SEBlock(nn.Module):
+    """Squeeze-and-Excitation block for channel attention."""
+    def __init__(self, channels, reduction=8):
+        super().__init__()
+        self.fc1 = nn.Conv2d(channels, channels // reduction, 1)
+        self.fc2 = nn.Conv2d(channels // reduction, channels, 1)
+        
+    def forward(self, x):
+        # Global average pooling
+        w = F.adaptive_avg_pool2d(x, 1)
+        # Squeeze and excitation
+        w = F.relu(self.fc1(w))
+        w = torch.sigmoid(self.fc2(w))
+        # Reweight channels
+        return x * w
+
+
+class GazeBiasedCrossAttention(nn.Module):
+    """Cross-attention fusion with gaze bias and grouped-query attention (GQA).
+    
+    Uses 4 Q heads but only 2 KV heads to save parameters while maintaining expressiveness.
+    """
+    def __init__(self, c_in_q=288, c_in_kv=288, d_model=160, h_q=4, h_kv=2, c_out=192):
+        super().__init__()
+        self.hq, self.hkv = h_q, h_kv
+        self.d_head = d_model // h_q
+        
+        # Projections (GQA: smaller KV, no bias as they're followed by norm)
+        self.q_proj = nn.Conv2d(c_in_q, d_model, 1, bias=False)  # 288->160
+        self.k_proj = nn.Conv2d(c_in_kv, self.hkv * self.d_head, 1, bias=False)  # 288->80
+        self.v_proj = nn.Conv2d(c_in_kv, self.hkv * self.d_head, 1, bias=False)  # 288->80
+        self.o_proj = nn.Conv2d(d_model, c_out, 1, bias=False)  # 160->192
+        
+        # Learnable per-head temperature
+        self.log_tau = nn.Parameter(torch.zeros(h_q) - 0.5)  # Initialize slightly negative for sharper attention
+        
+        # Relative position bias (per-head)
+        size = 22
+        table_size = 2 * size - 1  # 43
+        self.rpb = nn.Parameter(torch.zeros(h_q, table_size, table_size))
+        
+        # Gaze bias strength (learnable, constrained positive via softplus)
+        self._log_alpha = nn.Parameter(torch.zeros(1))  # start ~1.0 after softplus
+        
+        # Normalization
+        self.norm_q = nn.GroupNorm(32, c_in_q)
+        self.norm_kv = nn.GroupNorm(32, c_in_kv)
+        
+        # Precompute RPB indices once (for performance)
+        coords = torch.stack(torch.meshgrid(
+            torch.arange(size), torch.arange(size), indexing='ij'), dim=-1)  # [22,22,2]
+        rel = coords.view(-1, 1, 2) - coords.view(1, -1, 2)  # [484, 484, 2]
+        self.register_buffer("rpb_ix", (rel[..., 0] + (size - 1)).long(), persistent=False)
+        self.register_buffer("rpb_iy", (rel[..., 1] + (size - 1)).long(), persistent=False)
+        
+        # Precompute key coordinates for gaze bias (avoid rebuilding every forward)
+        H = W = 22
+        gy, gx = torch.meshgrid(torch.arange(H), torch.arange(W), indexing='ij')
+        self.register_buffer("key_y", gy.reshape(-1).float(), persistent=False)  # [484]
+        self.register_buffer("key_x", gx.reshape(-1).float(), persistent=False)  # [484]
+        
+        # Dropout for attention and residuals
+        self.attn_drop = nn.Dropout(p=0.03)
+        self.resid_drop = nn.Dropout2d(p=0.03)
+        
+        # Initialize
+        nn.init.trunc_normal_(self.rpb, std=0.02)
+        
+    def forward(self, q_feat, kv_feat, gaze_xy_norm=None):
+        """
+        Args:
+            q_feat: [B, C_q, H, W] query features (patch)
+            kv_feat: [B, C_kv, H, W] key/value features (context)
+            gaze_xy_norm: [B, 2] normalized gaze coordinates in [-1, 1]
+        """
+        B, _, H, W = q_feat.shape
+        
+        # Project Q, K, V
+        q = self.q_proj(self.norm_q(q_feat))  # [B, 160, 22, 22]
+        k = self.k_proj(self.norm_kv(kv_feat))  # [B, 80, 22, 22]
+        v = self.v_proj(self.norm_kv(kv_feat))  # [B, 80, 22, 22]
+        
+        # Reshape to heads
+        def split_heads(x, h):
+            # x: [B, h*d, H, W] -> [B, h, HW, d]
+            hd = x.shape[1]
+            d_head = hd // h
+            x = x.view(B, h, d_head, H, W).permute(0, 1, 3, 4, 2).reshape(B, h, H*W, d_head)
+            return x
+        
+        qh = split_heads(q, self.hq)  # [B, 4, 484, 40]
+        kh = split_heads(k, self.hkv)  # [B, 2, 484, 40]
+        vh = split_heads(v, self.hkv)  # [B, 2, 484, 40]
+        
+        # Broadcast KV heads to match Q heads (GQA)
+        kh = kh.repeat_interleave(self.hq // self.hkv, dim=1)  # [B, 4, 484, 40]
+        vh = vh.repeat_interleave(self.hq // self.hkv, dim=1)  # [B, 4, 484, 40]
+        
+        # Compute attention scores with cosine similarity for stability
+        # L2 normalize Q and K for cosine attention (explicit eps to avoid NaNs)
+        qh = F.normalize(qh, dim=-1, eps=1e-6)
+        kh = F.normalize(kh, dim=-1, eps=1e-6)
+        logits = torch.einsum('bhid,bhjd->bhij', qh, kh)  # [B, 4, 484, 484]
+        
+        # Add relative position bias (using precomputed indices)
+        rpb = self.rpb[:, self.rpb_ix, self.rpb_iy]  # [4, 484, 484]
+        logits = logits + rpb.unsqueeze(0)  # Broadcast over batch
+        
+        # Add gaze radial bias (always compute to ensure gradient flow)
+        # Apply positive alpha via softplus
+        alpha = F.softplus(self._log_alpha)
+        
+        if gaze_xy_norm is not None:
+            # Convert gaze from [-1, 1] to [0, 21] pixel coordinates
+            gx = (gaze_xy_norm[:, 0] + 1.0) * (H - 1) / 2
+            gy = (gaze_xy_norm[:, 1] + 1.0) * (W - 1) / 2
+            
+            # Use precomputed key coordinates (moved to device if needed)
+            ky = self.key_y  # [484]
+            kx = self.key_x  # [484]
+            
+            # Distance from each key position to gaze
+            dist = torch.sqrt((kx[None, :] - gx[:, None])**2 + (ky[None, :] - gy[:, None])**2)
+            
+            gaze_bias = -alpha * dist  # Closer = less negative = higher attention
+            logits = logits + gaze_bias[:, None, None, :]  # Add to keys dimension
+        else:
+            # For self-attention, add zero bias but ensure alpha is still computed (for gradient)
+            logits = logits + 0.0 * alpha  # Ensures gradient flow through alpha
+        
+        # Apply temperature per head (clamped for stability)
+        tau = torch.exp(self.log_tau).clamp(0.25, 4.0).view(1, self.hq, 1, 1)
+        attn = (logits / tau).softmax(dim=-1)
+        attn = self.attn_drop(attn)  # Small dropout on attention weights
+        
+        # Apply attention to values
+        out = torch.einsum('bhij,bhjd->bhid', attn, vh)  # [B, 4, 484, 40]
+        
+        # Reshape back to spatial
+        out = out.reshape(B, self.hq, H, W, self.d_head).permute(0, 1, 4, 2, 3)
+        out = out.reshape(B, -1, H, W)  # [B, 160, 22, 22]
+        out = self.o_proj(out)  # [B, 192, 22, 22]
+        
+        return self.resid_drop(out)  # Apply residual dropout
+
+
+class ASPPLite(nn.Module):
+    """Lightweight ASPP (Atrous Spatial Pyramid Pooling) for multi-scale context."""
+    def __init__(self, c=96, rates=(1, 2, 3)):
+        super().__init__()
+        self.branches = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(c, c, 3, padding=r, dilation=r, groups=c, bias=False),  # Depthwise
+                nn.Conv2d(c, c, 1, bias=True),  # Pointwise
+                nn.SiLU(inplace=True)  # Changed from ReLU to SiLU for better regression
+            ) for r in rates
+        ])
+        self.project = nn.Sequential(
+            nn.Conv2d(len(rates) * c, c, 1, bias=False),
+            nn.GroupNorm(16, c),
+            nn.SiLU(inplace=True)
+        )
+        
+    def forward(self, x):
+        xs = [branch(x) for branch in self.branches]
+        x = torch.cat(xs, dim=1)  # [B, 3*96, 22, 22]
+        return self.project(x)  # [B, 96, 22, 22]
+
+
 class BlurPool(nn.Module):
     """Antialiased downsampling with fixed Gaussian blur."""
     def __init__(self, channels, stride=2):
@@ -104,54 +273,78 @@ class SpatialDualResolutionGazeDepth(nn.Module):
         
         # Context encoder - processes downsampled full image with coordinate channels
         # Input: 7 channels (RGB + gaze_heatmap + x_coord + y_coord + r_to_gaze)
-        # Scaled up width for more capacity
         self.context_conv0_dw = nn.Conv2d(7, 7, kernel_size=11, stride=1, padding=5, groups=7)
         self.context_conv0_pw = nn.Conv2d(7, 96, kernel_size=1)
-        self.context_gn0 = nn.GroupNorm(16, 96)  # GroupNorm for coordinate channels
+        self.context_gn0 = nn.GroupNorm(16, 96)
         self.context_blur0 = BlurPool(channels=96, stride=2)  # 88 -> 44
         
         # Multi-scale gaze injection
         self.gaze_inject_44 = FiLMLayer(gaze_dim=2, feature_dim=96)
         
-        # Removed C1 and C2 since only C0 is used for ROI alignment
-        
-        # Patch encoder - processes high-res crop at gaze
+        # Patch encoder - WIDENED channels: 96->128, 192->224, 288->288
         # Input: 5 channels (RGB + delta_x + delta_y)
-        # Scaled up width for more capacity
-        self.patch_conv0_dw = nn.Conv2d(5, 5, kernel_size=3, stride=1, padding=1, groups=5)  # 88 -> 88
-        self.patch_conv0_pw = nn.Conv2d(5, 96, kernel_size=1)
-        self.patch_gn0 = nn.GroupNorm(16, 96)
-        self.patch_blur0 = BlurPool(channels=96, stride=2)  # 88 -> 44 (anti-aliased)
+        self.patch_conv0_dw = nn.Conv2d(5, 5, kernel_size=3, stride=1, padding=1, groups=5)
+        self.patch_conv0_pw = nn.Conv2d(5, 128, kernel_size=1)  # WIDENED: 96->128
+        self.patch_gn0 = nn.GroupNorm(16, 128)
+        self.patch_se0 = SEBlock(128, reduction=8)  # NEW: SE block
+        self.patch_blur0 = BlurPool(channels=128, stride=2)  # 88 -> 44
         
-        self.patch_conv1_dw = nn.Conv2d(96, 96, kernel_size=3, stride=1, padding=1, groups=96)  # 44 -> 44
-        self.patch_conv1_pw = nn.Conv2d(96, 192, kernel_size=1)
-        self.patch_gn1 = nn.GroupNorm(32, 192)
-        self.patch_blur1 = BlurPool(channels=192, stride=2)  # 44 -> 22 (anti-aliased)
+        self.patch_conv1_dw = nn.Conv2d(128, 128, kernel_size=3, stride=1, padding=1, groups=128)
+        self.patch_conv1_pw = nn.Conv2d(128, 224, kernel_size=1)  # WIDENED: 192->224
+        self.patch_gn1 = nn.GroupNorm(28, 224)  # Adjusted for 224 channels
+        self.patch_se1 = SEBlock(224, reduction=8)  # NEW: SE block
+        self.patch_blur1 = BlurPool(channels=224, stride=2)  # 44 -> 22
         
-        self.patch_conv2_dw = nn.Conv2d(192, 192, kernel_size=3, stride=1, padding=1, groups=192)  # 22 -> 22
-        self.patch_conv2_pw = nn.Conv2d(192, 288, kernel_size=1)
+        self.patch_conv2_dw = nn.Conv2d(224, 224, kernel_size=3, stride=1, padding=1, groups=224)
+        self.patch_conv2_pw = nn.Conv2d(224, 288, kernel_size=1)  # Keep 288 for fusion
         self.patch_gn2 = nn.GroupNorm(48, 288)
         
-        self.patch_conv3_dw = nn.Conv2d(288, 288, kernel_size=3, stride=1, padding=1, groups=288)  # 22 -> 22
+        self.patch_conv3_dw = nn.Conv2d(288, 288, kernel_size=3, stride=1, padding=1, groups=288)
         self.patch_conv3_pw = nn.Conv2d(288, 288, kernel_size=1)
         self.patch_gn3 = nn.GroupNorm(48, 288)
+        self.patch_se3 = SEBlock(288, reduction=12)  # NEW: SE block with higher reduction
         
         # Project context features from RoIAlign (96ch) to match patch (288ch)
-        self.ctx_proj = nn.Conv2d(96, 288, kernel_size=1)
+        self.ctx_proj = nn.Conv2d(96, 288, kernel_size=1, bias=False)  # No bias, followed by norm in attention
         
-        # Pointwise fusion only (no spatial convs) as specified
-        self.fuse_1x1 = nn.Sequential(
-            nn.Conv2d(288 + 288, 192, kernel_size=1),
-            nn.GroupNorm(32, 192),
+        # NEW: Cross-attention fusion (replaces concat + 1x1)
+        self.cross_attn = GazeBiasedCrossAttention(
+            c_in_q=288, c_in_kv=288, d_model=160, h_q=4, h_kv=2, c_out=192
+        )
+        
+        # NEW: Self-attention for patch refinement (no gaze bias needed)
+        self.self_attn = GazeBiasedCrossAttention(
+            c_in_q=192, c_in_kv=192, d_model=160, h_q=4, h_kv=2, c_out=192
+        )
+        
+        # NEW: Tiny FFN after attention (adds ~30k params for better mixing)
+        self.post_attn_ffn = nn.Sequential(
+            nn.Conv2d(192, 256, 1, bias=False),
+            nn.GELU(),
+            nn.Conv2d(256, 192, 1, bias=False)
+        )
+        
+        # NEW: Skip connection from pre-attention
+        self.skip_proj = nn.Conv2d(288, 192, kernel_size=1, bias=False)  # No bias for consistency
+        
+        # Reduce fused features to decoder width
+        self.fuse_reduce = nn.Sequential(
+            nn.Conv2d(192, 96, kernel_size=1, bias=False),  # No bias before norm
+            nn.GroupNorm(16, 96),
             nn.ReLU(inplace=True)
         )
-        self.dropout = nn.Dropout2d(p=0.10)  # After pointwise fusion
         
-        # Lightweight decoder at 22x22 only (no 44x44 detour)
-        self.decode_dw = nn.Conv2d(192, 192, kernel_size=3, padding=1, groups=192)
-        self.decode_pw = nn.Conv2d(192, 96, kernel_size=1)
+        self.dropout = nn.Dropout2d(p=0.10)  # After fusion
+        
+        # Decoder at 22x22
+        self.decode_dw = nn.Conv2d(96, 96, kernel_size=3, padding=1, groups=96)
+        self.decode_pw = nn.Conv2d(96, 96, kernel_size=1)
         self.decode_gn = nn.GroupNorm(16, 96)
-        self.head_dropout = nn.Dropout2d(p=0.10)  # Just before final convs
+        
+        # NEW: ASPP-lite for multi-scale context
+        self.aspp = ASPPLite(c=96, rates=(1, 2, 3))
+        
+        self.head_dropout = nn.Dropout2d(p=0.10)
         
         # Final channel reduction
         self.decode_final = nn.Conv2d(96, 48, kernel_size=1)
@@ -178,6 +371,9 @@ class SpatialDualResolutionGazeDepth(nn.Module):
         
         # Initialize weights
         self._init_weights()
+        
+        # Zero-init last conv of FFN for identity start
+        nn.init.zeros_(self.post_attn_ffn[-1].weight)
         
     def _init_weights(self):
         for m in self.modules():
@@ -307,33 +503,55 @@ class SpatialDualResolutionGazeDepth(nn.Module):
         delta_y = dy.expand(B, 1, H, W)
         patch_input = torch.cat([patch_rgb, delta_x, delta_y], dim=1)  # 5 channels
         
-        # Patch encoder with anti-aliased downsampling
+        # Patch encoder with SE blocks and anti-aliased downsampling
         p0_dw = self.patch_conv0_dw(patch_input)
-        p0 = F.relu(self.patch_gn0(self.patch_conv0_pw(p0_dw)))  # 88x88
+        p0 = F.relu(self.patch_gn0(self.patch_conv0_pw(p0_dw)))  # 88x88, 128ch
+        p0 = self.patch_se0(p0)  # Apply SE block
         p0_down = self.patch_blur0(p0)  # 88 -> 44
-        p1_dw = self.patch_conv1_dw(p0_down)
-        p1 = F.relu(self.patch_gn1(self.patch_conv1_pw(p1_dw)))    # 44x44
-        p1_down = self.patch_blur1(p1)  # 44 -> 22
-        p2_dw = self.patch_conv2_dw(p1_down)
-        p2 = F.relu(self.patch_gn2(self.patch_conv2_pw(p2_dw)))    # 22x22
-        p3_dw = self.patch_conv3_dw(p2)
-        p3 = F.relu(self.patch_gn3(self.patch_conv3_pw(p3_dw)))    # 22x22
         
-        # No skip connections in 22-only design
+        p1_dw = self.patch_conv1_dw(p0_down)
+        p1 = F.relu(self.patch_gn1(self.patch_conv1_pw(p1_dw)))  # 44x44, 224ch
+        p1 = self.patch_se1(p1)  # Apply SE block
+        p1_down = self.patch_blur1(p1)  # 44 -> 22
+        
+        p2_dw = self.patch_conv2_dw(p1_down)
+        p2 = F.relu(self.patch_gn2(self.patch_conv2_pw(p2_dw)))  # 22x22, 288ch
+        
+        p3_dw = self.patch_conv3_dw(p2)
+        p3 = F.relu(self.patch_gn3(self.patch_conv3_pw(p3_dw)))  # 22x22, 288ch
+        p3 = self.patch_se3(p3)  # Apply SE block
         
         # RoIAlign from 44x44 context features to extract patch-aligned context
         ctx_roi = self.roi_align_to_patch(c0_down, gaze_x, gaze_y)  # [B, 96, 22, 22]
         ctx_roi = self.ctx_proj(ctx_roi)  # Project to 288 channels [B, 288, 22, 22]
         
-        # Pointwise fusion only (as specified)
-        fused = torch.cat([ctx_roi, p3], dim=1)  # [B, 384, 22, 22]
-        fused = self.fuse_1x1(fused)  # [B, 128, 22, 22]
-        fused = self.dropout(fused)  # Apply dropout after fusion
+        # NEW: Cross-attention fusion (patch queries context)
+        gaze_coords = torch.stack([gaze_x, gaze_y], dim=1)  # [B, 2]
+        fused_ca = self.cross_attn(p3, ctx_roi, gaze_coords)  # [B, 192, 22, 22]
+        fused_ca = self.dropout(fused_ca)
         
-        # Lightweight decoder at 22x22 only
+        # NEW: Self-attention refinement (no gaze bias for self-attention)
+        fused_sa = self.self_attn(fused_ca, fused_ca, None)  # [B, 192, 22, 22]
+        
+        # NEW: Apply FFN after attention (transformer-style MLP)
+        # Note: residual dropout is already applied inside self_attn via resid_drop
+        fused_sa = fused_sa + self.post_attn_ffn(fused_sa)
+        
+        # NEW: Add skip connection from pre-attention
+        skip = self.skip_proj(p3)  # [B, 288, 22, 22] -> [B, 192, 22, 22]
+        fused_sa = fused_sa + skip
+        
+        # Reduce to decoder width
+        fused = self.fuse_reduce(fused_sa)  # [B, 96, 22, 22]
+        
+        # Decoder at 22x22
         d_dw = self.decode_dw(fused)
         d = F.relu(self.decode_gn(self.decode_pw(d_dw)))  # [B, 96, 22, 22]
-        d = self.head_dropout(d)  # Apply dropout before final layers
+        
+        # NEW: Apply ASPP for multi-scale context
+        d = self.aspp(d)  # [B, 96, 22, 22]
+        
+        d = self.head_dropout(d)
         d_final = self.decode_final(d)  # [B, 48, 22, 22]
         
         # Final predictions at 22x22
