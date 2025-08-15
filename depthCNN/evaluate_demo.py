@@ -25,6 +25,10 @@ from lightweight_dual_resolution import LightweightDualResolution
 from spatial_patch_encoder import SpatialPatchDepthPredictor
 from spatial_patch_encoder_aux import SpatialPatchDepthPredictorWithAux
 from model_rtmonodepth import RTMonoDepthS
+from dual_resolution_spatial_efficient import EfficientDualResolutionSpatial
+from dual_resolution_spatial import DualResolutionSpatial
+from dual_resolution_spatial_16x16 import EfficientDualResolutionSpatial16x16
+from spatial_dual_resolution_coordconv import SpatialDualResolutionGazeDepth
 
 
 def parse_args():
@@ -42,7 +46,7 @@ def parse_args():
     
     # Optional model configuration
     parser.add_argument('--model-type', type=str, default='auto',
-                        choices=['auto', 'single', 'multitask', 'dual', 'lightweight_dual', 'spatial', 'spatial_aux'],
+                        choices=['auto', 'single', 'multitask', 'dual', 'dual_spatial', 'lightweight_dual', 'spatial', 'spatial_aux'],
                         help='Model type (auto-detect from checkpoint)')
     parser.add_argument('--image-size', type=int, default=88,
                         help='Model input size (default: 88)')
@@ -77,8 +81,15 @@ def detect_model_type(checkpoint_path):
         checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
         
         # Extract state dict
-        if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-            state_dict = checkpoint['model_state_dict']
+        if isinstance(checkpoint, dict):
+            if 'model' in checkpoint:
+                state_dict = checkpoint['model']
+            elif 'model_state_dict' in checkpoint:
+                state_dict = checkpoint['model_state_dict']
+            elif 'state_dict' in checkpoint:
+                state_dict = checkpoint['state_dict']
+            else:
+                state_dict = checkpoint
             # Also check for saved args which might have model info
             args = checkpoint.get('args', {})
         else:
@@ -86,11 +97,21 @@ def detect_model_type(checkpoint_path):
             args = {}
         
         # Check for model type in saved args first
-        if 'model_type' in args:
+        if hasattr(args, 'model_type'):
+            return args.model_type
+        elif isinstance(args, dict) and 'model_type' in args:
             return args['model_type']
         
         # Check state dict keys for model architecture hints
         state_keys = list(state_dict.keys())
+        
+        # Check for SpatialDualResolutionGazeDepth (spatial_dual_coordconv model)
+        if any('cross_attn' in key or 'self_attn' in key for key in state_keys):
+            return 'spatial_dual_coordconv'
+        if any('context_conv0_dw' in key or 'patch_conv0_dw' in key for key in state_keys):
+            return 'spatial_dual_coordconv'
+        if any('aspp.branches' in key for key in state_keys):
+            return 'spatial_dual_coordconv'
         
         # Check for RT-MonoDepth signature
         if any('encoder.model' in key for key in state_keys):
@@ -106,6 +127,9 @@ def detect_model_type(checkpoint_path):
         
         # Check for dual resolution signatures
         if any('context_encoder' in key and 'patch_encoder' in key for key in state_keys):
+            # Check if it's the spatial variant
+            if any('decoder.initial' in key or 'decoder.up1' in key or 'decoder.up2' in key for key in state_keys):
+                return 'dual_spatial'
             return 'dual'
         
         # Check for spatial patch predictor
@@ -120,6 +144,8 @@ def detect_model_type(checkpoint_path):
         return 'rtmonodepth'
     elif 'spatial' in path_lower and 'aux' in path_lower:
         return 'spatial_aux'
+    elif 'dual_resolution_spatial' in path_lower:
+        return 'dual_spatial'
     elif 'spatial' in path_lower:
         return 'spatial'
     elif 'lightweight' in path_lower and 'dual' in path_lower:
@@ -152,16 +178,43 @@ def load_model(args, device):
         pass
     
     # Create appropriate model
-    if model_type == 'spatial_aux':
+    if model_type == 'spatial_dual_coordconv':
+        print(f"Loading SpatialDualResolutionGazeDepth model")
+        # This model has fixed architecture
+        model = SpatialDualResolutionGazeDepth()
+        is_dual = True
+        is_spatial = True
+        print(f"  Model: SpatialDualResolutionGazeDepth (0.76M params)")
+        print(f"  Context: 88x88, Patch: 88x88 → 44x44 → 22x22")
+        
+    elif model_type == 'spatial_aux':
         print(f"Loading spatial patch model with auxiliary losses")
         # Use saved args if available
-        patch_size = saved_args.get('depth_patch_size', 16)
-        spatial_region_size = saved_args.get('spatial_region_size', 5)
+        if isinstance(saved_args, dict):
+            patch_size = saved_args.get('depth_patch_size', 16)
+            spatial_region_size = saved_args.get('spatial_region_size', 5)
+        elif hasattr(saved_args, 'depth_patch_size'):
+            patch_size = getattr(saved_args, 'depth_patch_size', 16)
+            spatial_region_size = getattr(saved_args, 'spatial_region_size', 5)
+        else:
+            patch_size = 16
+            spatial_region_size = 5
         
+        # Get encoder parameters
+        if isinstance(saved_args, dict):
+            encoder_levels = saved_args.get('encoder_levels', args.encoder_levels)
+            base_channels = saved_args.get('base_channels', args.base_channels)
+        elif hasattr(saved_args, 'encoder_levels'):
+            encoder_levels = getattr(saved_args, 'encoder_levels', args.encoder_levels)
+            base_channels = getattr(saved_args, 'base_channels', args.base_channels)
+        else:
+            encoder_levels = args.encoder_levels
+            base_channels = args.base_channels
+            
         model = SpatialPatchDepthPredictorWithAux(
             image_size=args.image_size,
-            num_encoder_levels=saved_args.get('encoder_levels', args.encoder_levels),
-            base_channels=saved_args.get('base_channels', args.base_channels),
+            num_encoder_levels=encoder_levels,
+            base_channels=base_channels,
             spatial_region_size=spatial_region_size,
             patch_size=patch_size,
             use_auxiliary_losses=True
@@ -173,13 +226,31 @@ def load_model(args, device):
     elif model_type == 'spatial':
         print(f"Loading spatial patch model")
         # Use saved args if available
-        patch_size = saved_args.get('depth_patch_size', 16)
-        spatial_region_size = saved_args.get('spatial_region_size', 5)
+        if isinstance(saved_args, dict):
+            patch_size = saved_args.get('depth_patch_size', 16)
+            spatial_region_size = saved_args.get('spatial_region_size', 5)
+        elif hasattr(saved_args, 'depth_patch_size'):
+            patch_size = getattr(saved_args, 'depth_patch_size', 16)
+            spatial_region_size = getattr(saved_args, 'spatial_region_size', 5)
+        else:
+            patch_size = 16
+            spatial_region_size = 5
         
+        # Get encoder parameters
+        if isinstance(saved_args, dict):
+            encoder_levels = saved_args.get('encoder_levels', args.encoder_levels)
+            base_channels = saved_args.get('base_channels', args.base_channels)
+        elif hasattr(saved_args, 'encoder_levels'):
+            encoder_levels = getattr(saved_args, 'encoder_levels', args.encoder_levels)
+            base_channels = getattr(saved_args, 'base_channels', args.base_channels)
+        else:
+            encoder_levels = args.encoder_levels
+            base_channels = args.base_channels
+            
         model = SpatialPatchDepthPredictor(
             image_size=args.image_size,
-            num_encoder_levels=saved_args.get('encoder_levels', args.encoder_levels),
-            base_channels=saved_args.get('base_channels', args.base_channels),
+            num_encoder_levels=encoder_levels,
+            base_channels=base_channels,
             spatial_region_size=spatial_region_size,
             patch_size=patch_size
         )
@@ -198,11 +269,109 @@ def load_model(args, device):
         is_dual = True
         is_spatial = False
         
+    elif model_type == 'dual_spatial':
+        print(f"Loading dual-resolution spatial model")
+        
+        # Check the state dict to determine which architecture to use
+        state_keys = list(checkpoint_data['model_state_dict'].keys()) if checkpoint_data and 'model_state_dict' in checkpoint_data else []
+        
+        # Determine architecture based on state dict keys
+        use_efficient = True  # Default to efficient architecture
+        
+        # Check for specific decoder patterns
+        if any('spatial_decoder.decoder' in key for key in state_keys):
+            # Original DualResolutionSpatial has spatial_decoder.decoder
+            use_efficient = False
+        elif any('decoder.initial' in key or 'decoder.upsample' in key for key in state_keys):
+            # This is actually EfficientDualResolutionSpatial with 16x16 output
+            use_efficient = True
+        elif any('decoder.up1' in key or 'decoder.up2' in key for key in state_keys):
+            # This is EfficientDualResolutionSpatial with 44x44 output
+            use_efficient = True
+        
+        # Use saved args if available
+        if isinstance(saved_args, dict):
+            base_channels = saved_args.get('base_channels', 24)
+            spatial_region_size = saved_args.get('spatial_region_size', 5)
+            output_size = saved_args.get('output_size', 44)
+            dropout_rate = saved_args.get('dropout', 0.1)
+        elif hasattr(saved_args, 'base_channels'):
+            base_channels = getattr(saved_args, 'base_channels', 24)
+            spatial_region_size = getattr(saved_args, 'spatial_region_size', 5)
+            output_size = getattr(saved_args, 'output_size', 44)
+            dropout_rate = getattr(saved_args, 'dropout', 0.1)
+        else:
+            base_channels = 24
+            spatial_region_size = 5
+            output_size = 44
+            dropout_rate = 0.1
+        
+        # Override output size from checkpoint name if present
+        if '44x44' in args.checkpoint:
+            output_size = 44
+            print(f"Detected 44x44 output from checkpoint path")
+        elif '16x16' in args.checkpoint:
+            output_size = 16
+            print(f"Detected 16x16 output from checkpoint path")
+        
+        if use_efficient:
+            # Check if it's the 16x16 variant
+            if output_size == 16 and any('decoder.upsample' in key for key in state_keys):
+                print(f"  Using EfficientDualResolutionSpatial16x16 architecture")
+                model = EfficientDualResolutionSpatial16x16(
+                    base_channels=base_channels,
+                    spatial_region_size=spatial_region_size,
+                    output_size=output_size,
+                    dropout_rate=dropout_rate
+                )
+            else:
+                print(f"  Using EfficientDualResolutionSpatial architecture")
+                model = EfficientDualResolutionSpatial(
+                    base_channels=base_channels,
+                    spatial_region_size=spatial_region_size,
+                    output_size=output_size,
+                    dropout_rate=dropout_rate
+                )
+        else:
+            print(f"  Using DualResolutionSpatial architecture")
+            # Get additional parameters for the original architecture
+            if isinstance(saved_args, dict):
+                context_channels = saved_args.get('context_channels', 32)
+                patch_channels = saved_args.get('patch_channels', 32)
+            elif hasattr(saved_args, 'context_channels'):
+                context_channels = getattr(saved_args, 'context_channels', 32)
+                patch_channels = getattr(saved_args, 'patch_channels', 32)
+            else:
+                context_channels = 32
+                patch_channels = 32
+                
+            model = DualResolutionSpatial(
+                context_channels=context_channels,
+                patch_channels=patch_channels,
+                spatial_region_size=spatial_region_size,
+                output_size=output_size,
+                dropout_rate=dropout_rate
+            )
+            
+        is_dual = True
+        is_spatial = True  # It outputs spatial patches
+        print(f"  Base/context channels: {base_channels if use_efficient else context_channels}")
+        print(f"  Spatial region size: {spatial_region_size}")
+        print(f"  Output size: {output_size}x{output_size}")
+        print(f"  Architecture: 88x88 context + 44x44 patch → {output_size}x{output_size} depth")
+        
     elif model_type == 'dual':
         print(f"Loading dual-resolution model")
         # Try to infer configuration from saved args or checkpoint name
-        context_channels = saved_args.get('context_channels', args.base_channels)
-        patch_channels = saved_args.get('patch_channels', args.base_channels)
+        if isinstance(saved_args, dict):
+            context_channels = saved_args.get('context_channels', args.base_channels)
+            patch_channels = saved_args.get('patch_channels', args.base_channels)
+        elif hasattr(saved_args, 'context_channels'):
+            context_channels = getattr(saved_args, 'context_channels', args.base_channels)
+            patch_channels = getattr(saved_args, 'patch_channels', args.base_channels)
+        else:
+            context_channels = args.base_channels
+            patch_channels = args.base_channels
         
         # Override from checkpoint name if present
         if 'ch32' in args.checkpoint:
@@ -214,18 +383,37 @@ def load_model(args, device):
         
         # Check for output size in saved args or filename
         output_size = 11  # default
-        if saved_args.get('output_size'):
+        if isinstance(saved_args, dict) and saved_args.get('output_size'):
             output_size = saved_args['output_size']
+        elif hasattr(saved_args, 'output_size'):
+            output_size = getattr(saved_args, 'output_size', 11)
+        elif '44x44' in args.checkpoint:
+            output_size = 44
+            print(f"Detected 44x44 output from checkpoint path")
         elif '3x3' in args.checkpoint:
             output_size = 3
             print(f"Detected 3x3 output from checkpoint path")
         
+        # Get remaining parameters with proper handling
+        if isinstance(saved_args, dict):
+            context_levels = saved_args.get('context_levels', args.encoder_levels)
+            patch_size = saved_args.get('patch_size', args.patch_size)
+            patch_levels = saved_args.get('patch_levels', args.encoder_levels)
+        elif hasattr(saved_args, 'context_levels'):
+            context_levels = getattr(saved_args, 'context_levels', args.encoder_levels)
+            patch_size = getattr(saved_args, 'patch_size', args.patch_size)
+            patch_levels = getattr(saved_args, 'patch_levels', args.encoder_levels)
+        else:
+            context_levels = args.encoder_levels
+            patch_size = args.patch_size
+            patch_levels = args.encoder_levels
+            
         model = DualResolutionGazeDepth(
             context_size=args.image_size,
-            context_levels=saved_args.get('context_levels', args.encoder_levels),
+            context_levels=context_levels,
             context_channels=context_channels,
-            patch_size=saved_args.get('patch_size', args.patch_size),
-            patch_levels=saved_args.get('patch_levels', args.encoder_levels),
+            patch_size=patch_size,
+            patch_levels=patch_levels,
             patch_channels=patch_channels,
             output_size=output_size,
             max_depth=10.0,
@@ -319,15 +507,26 @@ def load_model(args, device):
     else:
         checkpoint = checkpoint_data
     
-    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-        # Try to load state dict with strict=False to handle minor mismatches
-        try:
-            model.load_state_dict(checkpoint['model_state_dict'], strict=True)
+    if isinstance(checkpoint, dict):
+        # Check for different key names where model state might be stored
+        if 'model' in checkpoint:
+            # New checkpoint format with 'model' key
+            model.load_state_dict(checkpoint['model'])
             print(f"Loaded checkpoint from epoch {checkpoint.get('epoch', 'unknown')}")
-        except RuntimeError as e:
-            print(f"Warning: Loading with strict=False due to: {e}")
-            model.load_state_dict(checkpoint['model_state_dict'], strict=False)
-            print(f"Loaded checkpoint (partial match) from epoch {checkpoint.get('epoch', 'unknown')}")
+            if 'best_val_loss' in checkpoint:
+                print(f"  Best val loss: {checkpoint['best_val_loss']:.4f}")
+        elif 'model_state_dict' in checkpoint:
+            # Try to load state dict with strict=False to handle minor mismatches
+            try:
+                model.load_state_dict(checkpoint['model_state_dict'], strict=True)
+                print(f"Loaded checkpoint from epoch {checkpoint.get('epoch', 'unknown')}")
+            except RuntimeError as e:
+                print(f"Warning: Loading with strict=False due to: {e}")
+                model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+                print(f"Loaded checkpoint (partial match) from epoch {checkpoint.get('epoch', 'unknown')}")
+        else:
+            # Assume the dict itself is the state dict
+            model.load_state_dict(checkpoint)
     else:
         model.load_state_dict(checkpoint)
     
@@ -361,11 +560,32 @@ def preprocess_image(image_path, target_size=88):
 
 def extract_patch_around_gaze(image_tensor, gaze_x, gaze_y, patch_size=96, context_size=88):
     """Extract high-resolution patch around gaze location."""
-    # For demo purposes, we'll extract a patch from the resized image
-    # In a real application, you might want to extract from the original high-res image
+    # For EfficientDualResolutionSpatial, we need a 44×44 RGB patch
+    # The model's patch encoder expects 44×44 input, not 96×96
     
-    # Simple center crop for now (as gaze is typically near center)
-    # In practice, you'd extract around the actual gaze location
+    # For models that need 44×44 patches specifically
+    if patch_size == 44:
+        # Just resize the context image to 44×44
+        patch = torch.nn.functional.interpolate(
+            image_tensor.unsqueeze(0),
+            size=(44, 44),
+            mode='bilinear',
+            align_corners=True
+        ).squeeze(0)
+        return patch
+    
+    # For SpatialDualResolutionGazeDepth model, patch size should match context (88x88)
+    if patch_size == 88:
+        # Just return the same as context
+        patch = torch.nn.functional.interpolate(
+            image_tensor.unsqueeze(0),
+            size=(88, 88),
+            mode='bilinear',
+            align_corners=True
+        ).squeeze(0)
+        return patch
+    
+    # For other models, keep original behavior
     C, H, W = image_tensor.shape
     
     # Create a slightly upscaled version to extract patch from
@@ -465,7 +685,42 @@ def predict_depth(model, image_tensor, patch_tensor, gaze_x, gaze_y, is_dual, is
             # Dual-resolution model
             patch_batch = patch_tensor.unsqueeze(0).to(device)
             outputs = model(image_batch, patch_batch, gaze_x_tensor, gaze_y_tensor)
-            depth = outputs['depth'].item()
+            
+            # Check if outputs is a tuple (for SpatialDualResolutionGazeDepth)
+            if isinstance(outputs, tuple):
+                # SpatialDualResolutionGazeDepth returns (depth, log_sigma, gaze_depth)
+                depth_output = outputs[0]  # Main depth prediction
+            else:
+                # Other dual-resolution models return a dict
+                depth_output = outputs['depth']
+            print(f"Debug: depth_output shape = {depth_output.shape}")
+            print(f"Debug: depth_output total elements = {depth_output.numel()}")
+            
+            # Handle different output shapes
+            if depth_output.numel() == 1:
+                # Single value output
+                depth = depth_output.item()
+            else:
+                # Patch output - reshape if needed
+                if depth_output.dim() == 1:
+                    # Flattened output, need to reshape
+                    size = int(np.sqrt(depth_output.numel()))
+                    depth_patch = depth_output.view(size, size)
+                elif depth_output.dim() == 2:
+                    depth_patch = depth_output
+                elif depth_output.dim() == 3:
+                    depth_patch = depth_output[0]  # Remove batch dimension
+                elif depth_output.dim() == 4:
+                    # Shape: [batch, channel, height, width]
+                    depth_patch = depth_output[0, 0]  # Remove batch and channel dimensions
+                else:
+                    raise ValueError(f"Unexpected depth output dimensions: {depth_output.dim()}")
+                
+                # Extract center pixel
+                center_y = depth_patch.shape[0] // 2
+                center_x = depth_patch.shape[1] // 2
+                print(f"Debug: Extracting center pixel at ({center_y}, {center_x}) from {depth_patch.shape}")
+                depth = depth_patch[center_y, center_x].item()
         elif is_spatial:
             # Spatial patch models
             outputs = model(image_batch, gaze_x_tensor, gaze_y_tensor)
@@ -571,9 +826,18 @@ def main():
     # Extract patch for dual-resolution models
     patch_tensor = None
     if is_dual:
+        # For dual_spatial models, we need a 44×44 patch
+        model_type = detect_model_type(args.checkpoint) if args.model_type == 'auto' else args.model_type
+        if model_type == 'dual_spatial':
+            patch_size = 44  # EfficientDualResolutionSpatial expects 44×44 patches
+        elif model_type == 'spatial_dual_coordconv':
+            patch_size = 88  # SpatialDualResolutionGazeDepth expects 88×88 patches
+        else:
+            patch_size = args.patch_size
+            
         patch_tensor = extract_patch_around_gaze(
             image_tensor, scaled_gaze_x, scaled_gaze_y, 
-            args.patch_size, args.image_size
+            patch_size, args.image_size
         )
     
     # Load ground truth depth if available
