@@ -318,9 +318,9 @@ def train_epoch(model, train_loader, optimizer, scheduler, loss_fns, epoch,
         else:
             gaze_loss = torch.tensor(0.0, device=pred_depth.device)
         
-        # Total loss with new terms (added gradient consistency with weight 0.05)
-        loss = si_log_loss + 0.1 * berhu_loss + 0.01 * smooth_loss + 0.1 * heteroscedastic_loss + \
-               0.2 * center_loss + 0.5 * gaze_loss + 0.05 * grad_consistency
+        # Total loss with gaze as primary objective (point prediction focus)
+        loss = 1.0 * si_log_loss + 0.05 * berhu_loss + 0.01 * smooth_loss + 0.05 * heteroscedastic_loss + \
+               0.1 * center_loss + 2.0 * gaze_loss + 0.05 * grad_consistency
         
         # Backward pass
         optimizer.zero_grad()
@@ -479,9 +479,9 @@ def validate(model, val_loader, loss_fns, epoch, writer, distributed, rank, worl
             else:
                 gaze_loss = torch.tensor(0.0, device=pred_depth.device)
             
-            # Total loss with new terms (added gradient consistency with weight 0.05)
-            loss = si_log_loss + 0.1 * berhu_loss + 0.01 * smooth_loss + 0.1 * heteroscedastic_loss + \
-                   0.2 * center_loss + 0.5 * gaze_loss + 0.05 * grad_consistency
+            # Total loss with gaze as primary objective (point prediction focus)
+            loss = 1.0 * si_log_loss + 0.05 * berhu_loss + 0.01 * smooth_loss + 0.05 * heteroscedastic_loss + \
+                   0.1 * center_loss + 2.0 * gaze_loss + 0.05 * grad_consistency
             
             # Compute metrics
             metrics = compute_metrics(pred_depth.squeeze(1), depth_gt, valid_mask)

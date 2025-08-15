@@ -355,12 +355,20 @@ class SpatialDualResolutionGazeDepth(nn.Module):
         # Uncertainty prediction
         self.uncertainty_conv = nn.Conv2d(48, 1, kernel_size=1)
         
-        # NEW: Scalar gaze depth head (Fix #1)
-        self.gaze_head = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),  # Global pool the features
-            nn.Conv2d(48, 24, 1),
+        # NEW: Precise K×K gaze sampling head (multi-scale point query)
+        self.gaze_k = 5  # K×K neighborhood sampling
+        
+        # Lightweight channel projections (keep params < 1M)
+        self.gaze_proj_p0 = nn.Conv2d(128, 16, 1)  # 88×88 features → 16 channels
+        self.gaze_proj_p1 = nn.Conv2d(224, 16, 1)  # 44×44 features → 16 channels
+        self.gaze_proj_d = nn.Conv2d(48, 16, 1)    # 22×22 features → 16 channels
+        
+        # Small MLP for gaze depth prediction
+        # Input: 3 scales × 16 channels × 5×5 + 2 gaze coords = 1202
+        self.gaze_mlp = nn.Sequential(
+            nn.Linear(3 * 16 * 5 * 5 + 2, 128),
             nn.ReLU(inplace=True),
-            nn.Conv2d(24, 1, 1)  # Output scalar depth
+            nn.Linear(128, 1)
         )
         
         # NEW: Register Gaussian weight map for loss (Fix #4)
@@ -402,6 +410,32 @@ class SpatialDualResolutionGazeDepth(nn.Module):
         
         return x_grid, y_grid
         
+    def sample_kxk_at_gaze(self, feat, K=5):
+        """
+        Sample K×K patch centered at gaze location.
+        Since our patch is already gaze-centered, sample around the center.
+        Uses grid_sample with align_corners=False for precise sub-pixel alignment.
+        """
+        B, C, H, W = feat.shape
+        device = feat.device
+        
+        # Create K×K grid centered at origin (gaze is at center of our gaze-centered patches)
+        # Scale the grid based on feature map size
+        ks = torch.linspace(-(K-1)/2, (K-1)/2, K, device=device) * 2.0 / H
+        grid_y, grid_x = torch.meshgrid(ks, ks, indexing='ij')
+        grid = torch.stack([grid_x, grid_y], dim=-1)  # [K, K, 2]
+        grid = grid.unsqueeze(0).expand(B, -1, -1, -1)  # [B, K, K, 2]
+        
+        # Sample with bilinear interpolation
+        sampled = F.grid_sample(
+            feat, grid,
+            mode='bilinear',
+            align_corners=False,  # Critical for correct sub-pixel alignment
+            padding_mode='reflection'
+        )
+        
+        return sampled  # [B, C, K, K]
+    
     def create_gaze_heatmap(self, gaze_x, gaze_y, height, width, device, sigma_px=2.5):
         """Create Gaussian heatmap at gaze location."""
         # convert pixel sigma to normalized units in [-1, 1] with align_corners=False
@@ -560,9 +594,29 @@ class SpatialDualResolutionGazeDepth(nn.Module):
         
         log_sigma = self.uncertainty_conv(d_final)  # Output log(sigma) directly
         
-        # NEW: Scalar gaze depth prediction (Fix #1)
-        gaze_depth = self.gaze_head(d_final)  # [B, 1, 1, 1]
-        gaze_depth = F.softplus(gaze_depth.squeeze(-1).squeeze(-1)) + 0.1  # [B, 1]
+        # NEW: Precise multi-scale gaze depth prediction
+        # Project features to lightweight channels
+        p0_proj = self.gaze_proj_p0(p0)  # [B, 16, 88, 88]
+        p1_proj = self.gaze_proj_p1(p1)  # [B, 16, 44, 44]
+        d_proj = self.gaze_proj_d(d_final)  # [B, 16, 22, 22]
+        
+        # Sample K×K neighborhoods at gaze location from each scale
+        p0_sample = self.sample_kxk_at_gaze(p0_proj, self.gaze_k)  # [B, 16, 5, 5]
+        p1_sample = self.sample_kxk_at_gaze(p1_proj, self.gaze_k)  # [B, 16, 5, 5]
+        d_sample = self.sample_kxk_at_gaze(d_proj, self.gaze_k)    # [B, 16, 5, 5]
+        
+        # Flatten and concatenate with gaze coordinates
+        gaze_features = torch.cat([
+            p0_sample.flatten(1),  # 16*5*5 = 400
+            p1_sample.flatten(1),  # 16*5*5 = 400
+            d_sample.flatten(1),   # 16*5*5 = 400
+            gaze_x.view(B, 1),     # 1
+            gaze_y.view(B, 1)      # 1
+        ], dim=1)  # Total: 1202
+        
+        # MLP to predict exact gaze depth
+        gaze_depth = self.gaze_mlp(gaze_features)  # [B, 1]
+        gaze_depth = F.softplus(gaze_depth) + 0.1  # [B, 1] with minimum depth
         
         return depth, log_sigma, gaze_depth
 

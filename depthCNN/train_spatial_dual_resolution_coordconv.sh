@@ -10,6 +10,13 @@
 # Activate conda environment
 source ~/miniconda3/bin/activate orbslam
 
+# Create log directory if it doesn't exist
+mkdir -p ./logs/spatial_dual_coordconv
+
+# Generate timestamp for log file
+TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+LOG_FILE="./logs/spatial_dual_coordconv/training_${TIMESTAMP}.log"
+
 # Check if running with DDP
 if [ -z "$1" ]; then
     echo "Usage: $0 <num_gpus> [resume_checkpoint] [options]"
@@ -30,8 +37,8 @@ BATCH_SIZE=32  # Per GPU
 EPOCHS=${EPOCHS:-100}  # Standard training epochs
 LR=${LR:-1e-4}  # Standard learning rate for fresh training
 WEIGHT_DECAY=${WEIGHT_DECAY:-1e-4}  # Standard weight decay
-CHECKPOINT_DIR="./checkpoints/spatial_dual_coordconv_full"
-LOG_DIR="./logs/spatial_dual_coordconv_full"
+CHECKPOINT_DIR="./checkpoints/spatial_dual_coordconv"
+LOG_DIR="./logs/spatial_dual_coordconv"
 SCHEDULER=${SCHEDULER:-cosine_restarts}  # Default to cosine warm restarts
 USE_SWA=${USE_SWA:-0}  # Disable SWA for standard training
 
@@ -85,8 +92,9 @@ if [ $NUM_GPUS -eq 1 ]; then
         CMD="$CMD --resume $RESUME_CHECKPOINT"
     fi
     
-    # Execute command
-    eval $CMD
+    # Execute command and save output
+    echo "Saving output to: $LOG_FILE"
+    eval $CMD 2>&1 | tee $LOG_FILE
         
 elif [ $NUM_GPUS -gt 1 ]; then
     echo "Training on $NUM_GPUS GPUs with DDP"
@@ -130,11 +138,15 @@ elif [ $NUM_GPUS -gt 1 ]; then
         CMD="$CMD --resume $RESUME_CHECKPOINT"
     fi
     
-    # Execute command
-    eval $CMD
+    # Execute command and save output
+    echo "Saving output to: $LOG_FILE"
+    eval $CMD 2>&1 | tee $LOG_FILE
 else
     echo "Invalid number of GPUs: $NUM_GPUS"
     exit 1
 fi
 
 echo "Training completed!"
+echo "Terminal output saved to: $LOG_FILE"
+echo "TensorBoard logs saved to: $LOG_DIR"
+echo "Checkpoints saved to: $CHECKPOINT_DIR"
