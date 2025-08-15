@@ -311,10 +311,20 @@ def train_epoch(model, train_loader, optimizer, scheduler, loss_fns, epoch,
         # NEW: Scalar gaze depth loss (Fix #1)
         # Only compute loss for valid gaze points
         gaze_valid = (gaze_depth_gt > 0).float()
+        
+        # Check if we have real gaze points (weight them higher)
+        if 'is_real_gaze' in batch:
+            is_real_gaze = batch['is_real_gaze'].cuda(non_blocking=True).float()
+            # Weight real gaze points 2x more than sampled points
+            gaze_weight = torch.where(is_real_gaze > 0.5, 2.0, 1.0)
+        else:
+            gaze_weight = torch.ones_like(gaze_valid)
+        
         if gaze_valid.sum() > 0:
-            # Squeeze pred_gaze_depth to match gaze_depth_gt shape
-            gaze_loss = F.l1_loss(pred_gaze_depth.squeeze(-1)[gaze_valid > 0], 
-                                 gaze_depth_gt[gaze_valid > 0], reduction='mean')
+            # Apply weighted loss
+            gaze_diff = torch.abs(pred_gaze_depth.squeeze(-1) - gaze_depth_gt)
+            weighted_loss = gaze_diff * gaze_valid * gaze_weight
+            gaze_loss = weighted_loss.sum() / (gaze_valid * gaze_weight).sum()
         else:
             gaze_loss = torch.tensor(0.0, device=pred_depth.device)
         

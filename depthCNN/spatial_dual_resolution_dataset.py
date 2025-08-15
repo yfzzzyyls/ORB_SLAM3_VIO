@@ -8,14 +8,16 @@ import torchvision.transforms.functional as TF
 from torchvision.transforms import InterpolationMode
 from PIL import Image
 import random
+import cv2
 from spatial_dual_resolution_coordconv import GaussianDownsample
 
 
 class SpatialDualResolutionDataset(Dataset):
     def __init__(self, data_root, split='train', context_size=88, patch_size=88, 
-                 output_size=22, augment=True, max_sequences=None, random_seed=42):
+                 output_size=22, augment=True, max_sequences=None, random_seed=42,
+                 k_extra=4, edge_bias_prob=0.3):
         """
-        Dataset for spatial dual-resolution training.
+        Dataset for spatial dual-resolution training with multi-point sampling.
         
         Args:
             data_root: Root directory containing train/val/test splits
@@ -26,6 +28,8 @@ class SpatialDualResolutionDataset(Dataset):
             augment: Whether to apply augmentations
             max_sequences: Maximum number of sequences to use (None = use all)
             random_seed: Random seed for reproducible sequence selection
+            k_extra: Number of extra points to sample per image (training only)
+            edge_bias_prob: Probability of edge-biased sampling (vs uniform)
         """
         self.data_root = data_root
         self.split = split
@@ -33,6 +37,8 @@ class SpatialDualResolutionDataset(Dataset):
         self.patch_size = patch_size
         self.output_size = output_size
         self.augment = augment and (split == 'train')
+        self.k_extra = k_extra if split == 'train' else 0  # Only add extra points during training
+        self.edge_bias_prob = edge_bias_prob
         
         # Original image size
         self.original_size = 1408
@@ -84,9 +90,15 @@ class SpatialDualResolutionDataset(Dataset):
                     })
         
         print(f"Found {len(self.samples)} samples for {split} split")
+        if self.k_extra > 0:
+            print(f"Will sample {self.k_extra} extra points per image (edge bias: {edge_bias_prob*100:.0f}%)")
         
     def __len__(self):
-        return len(self.samples)
+        # During training, we effectively have more samples
+        base_len = len(self.samples)
+        if self.k_extra > 0:
+            return base_len * (1 + self.k_extra)
+        return base_len
         
     def _load_rgb(self, path):
         """Load RGB image."""
@@ -103,6 +115,76 @@ class SpatialDualResolutionDataset(Dataset):
         with open(path, 'r') as f:
             gaze_data = json.load(f)
         return gaze_data
+    
+    def _compute_edge_map(self, depth):
+        """Compute edge magnitude using Sobel filter."""
+        # Convert invalid depths to 0 for edge detection
+        depth_clean = depth.copy()
+        depth_clean[depth <= 0] = 0
+        
+        # Compute Sobel gradients
+        sobel_x = cv2.Sobel(depth_clean, cv2.CV_32F, 1, 0, ksize=3)
+        sobel_y = cv2.Sobel(depth_clean, cv2.CV_32F, 0, 1, ksize=3)
+        
+        # Compute magnitude
+        edge_magnitude = np.sqrt(sobel_x**2 + sobel_y**2)
+        
+        # Zero out edges at invalid regions
+        edge_magnitude[depth <= 0] = 0
+        
+        return edge_magnitude
+    
+    def _sample_valid_point(self, depth, edge_map=None, edge_biased=False):
+        """Sample a valid point from the depth map.
+        
+        Args:
+            depth: Full resolution depth map [H, W]
+            edge_map: Edge magnitude map for edge-biased sampling
+            edge_biased: Whether to use edge-biased sampling
+        
+        Returns:
+            (x, y) coordinates in pixel space, or None if no valid point found
+        """
+        # Create validity mask (with some margin from borders)
+        margin = self.patch_size // 2 + 10
+        valid_mask = np.zeros_like(depth, dtype=bool)
+        valid_mask[margin:-margin, margin:-margin] = depth[margin:-margin, margin:-margin] > 0
+        
+        if not valid_mask.any():
+            return None
+            
+        if edge_biased and edge_map is not None:
+            # Edge-biased sampling: sample proportional to edge magnitude
+            # Apply validity mask
+            edge_weights = edge_map * valid_mask.astype(np.float32)
+            
+            # Add small epsilon to ensure some probability everywhere valid
+            edge_weights = edge_weights + 0.01 * valid_mask.astype(np.float32)
+            
+            # Normalize to probability distribution
+            edge_weights = edge_weights / edge_weights.sum()
+            
+            # Sample from distribution
+            flat_idx = np.random.choice(
+                edge_weights.size, 
+                p=edge_weights.ravel()
+            )
+            y, x = np.unravel_index(flat_idx, edge_weights.shape)
+        else:
+            # Uniform sampling from valid pixels
+            valid_coords = np.where(valid_mask)
+            idx = np.random.randint(len(valid_coords[0]))
+            y, x = valid_coords[0][idx], valid_coords[1][idx]
+        
+        # Add small random offset for sub-pixel coordinates
+        x = x + np.random.uniform(-0.5, 0.5)
+        y = y + np.random.uniform(-0.5, 0.5)
+        
+        # Clamp to valid range
+        x = np.clip(x, margin, self.original_size - margin - 1)
+        y = np.clip(y, margin, self.original_size - margin - 1)
+        
+        return x, y
         
     def _extract_patch(self, image, center_x, center_y, patch_size):
         """Extract a gaze-centered patch using reflect padding at borders.
@@ -181,34 +263,68 @@ class SpatialDualResolutionDataset(Dataset):
             return patch_tensor.squeeze(0).squeeze(0).numpy()
             
     def __getitem__(self, idx):
-        sample = self.samples[idx]
+        # Determine which base sample and which point (gaze or extra)
+        base_idx = idx % len(self.samples)
+        point_idx = idx // len(self.samples)  # 0 = gaze, 1-k_extra = extra points
+        
+        sample = self.samples[base_idx]
         
         # Load data
         rgb = self._load_rgb(sample['rgb_path'])
         depth = self._load_depth(sample['depth_path'])
         gaze_data = self._load_gaze(sample['gaze_path'])
         
-        # Get gaze coordinates (already in pixels)
-        gaze_x = gaze_data['x_pixel']
-        gaze_y = gaze_data['y_pixel']
+        # Get original gaze coordinates (already in pixels)
+        orig_gaze_x = gaze_data['x_pixel']
+        orig_gaze_y = gaze_data['y_pixel']
         
-        # Data augmentation
+        # Data augmentation (apply same augmentation to all points from this image)
         if self.augment:
-            # Random horizontal flip
-            if random.random() > 0.5:
+            # Store augmentation parameters
+            do_flip = random.random() > 0.5
+            brightness_factor = 0.8 + random.random() * 0.4
+            contrast_factor = 0.8 + random.random() * 0.4
+            gaze_shift_x = random.randint(-10, 10)
+            gaze_shift_y = random.randint(-10, 10)
+            
+            # Apply augmentations
+            if do_flip:
                 rgb = TF.hflip(rgb)
-                depth = np.fliplr(depth).copy()  # .copy() ensures contiguous array
-                gaze_x = self.original_size - 1 - gaze_x
+                depth = np.fliplr(depth).copy()
+                orig_gaze_x = self.original_size - 1 - orig_gaze_x
                 
-            # Random color jitter
-            rgb = TF.adjust_brightness(rgb, 0.8 + random.random() * 0.4)
-            rgb = TF.adjust_contrast(rgb, 0.8 + random.random() * 0.4)
+            rgb = TF.adjust_brightness(rgb, brightness_factor)
+            rgb = TF.adjust_contrast(rgb, contrast_factor)
+        else:
+            gaze_shift_x = gaze_shift_y = 0
+        
+        # Determine which point to use for this sample
+        if point_idx == 0:
+            # Use original gaze point (with potential augmentation shift)
+            gaze_x = orig_gaze_x + gaze_shift_x
+            gaze_y = orig_gaze_y + gaze_shift_y
+            is_real_gaze = True
+        else:
+            # Sample an extra point
+            # Compute edge map for potential edge-biased sampling
+            edge_map = self._compute_edge_map(depth) if self.edge_bias_prob > 0 else None
             
-            # Small random shift to gaze position (±10 pixels)
-            gaze_x += random.randint(-10, 10)
-            gaze_y += random.randint(-10, 10)
+            # Decide sampling strategy
+            use_edge_bias = random.random() < self.edge_bias_prob
             
-        # Clamp gaze to valid range
+            # Sample a valid point
+            point = self._sample_valid_point(depth, edge_map, use_edge_bias)
+            
+            if point is None:
+                # Fallback to a random point near center if no valid point found
+                gaze_x = self.original_size // 2 + random.randint(-100, 100)
+                gaze_y = self.original_size // 2 + random.randint(-100, 100)
+            else:
+                gaze_x, gaze_y = point
+            
+            is_real_gaze = False
+        
+        # Clamp to valid range
         gaze_x = np.clip(gaze_x, 0, self.original_size - 1)
         gaze_y = np.clip(gaze_y, 0, self.original_size - 1)
         
@@ -293,6 +409,7 @@ class SpatialDualResolutionDataset(Dataset):
             'gaze_x': torch.tensor(gaze_x_norm, dtype=torch.float32),
             'gaze_y': torch.tensor(gaze_y_norm, dtype=torch.float32),
             'gaze_depth_gt': torch.tensor(gaze_depth_gt, dtype=torch.float32),  # NEW: scalar gaze GT
+            'is_real_gaze': torch.tensor(is_real_gaze, dtype=torch.bool),  # Track if real gaze
             'seq': sample['seq'],
             'frame_id': sample['frame_id']
         }
@@ -314,6 +431,7 @@ def custom_collate_fn(batch):
     gaze_x = torch.stack([s['gaze_x'] for s in batch])
     gaze_y = torch.stack([s['gaze_y'] for s in batch])
     gaze_depth_gt = torch.stack([s['gaze_depth_gt'] for s in batch])  # NEW
+    is_real_gaze = torch.stack([s['is_real_gaze'] for s in batch])  # NEW
     
     # Keep metadata as lists
     seqs = [s['seq'] for s in batch]
@@ -327,6 +445,7 @@ def custom_collate_fn(batch):
         'gaze_x': gaze_x,
         'gaze_y': gaze_y,
         'gaze_depth_gt': gaze_depth_gt,  # NEW
+        'is_real_gaze': is_real_gaze,  # NEW: track real vs sampled
         'seqs': seqs,
         'frame_ids': frame_ids
     }
