@@ -249,6 +249,33 @@ def compute_metrics(pred, target, mask):
         'a3': a3.item()
     }
 
+def compute_gaze_metrics(pred_gaze, target_gaze, valid_mask):
+    """Compute gaze-specific evaluation metrics."""
+    # Filter valid gaze points
+    valid = (valid_mask > 0) & (target_gaze > 0)
+    
+    if valid.sum() == 0:
+        return {}
+    
+    pred_valid = pred_gaze[valid]
+    target_valid = target_gaze[valid]
+    
+    # MAE
+    mae = torch.mean(torch.abs(pred_valid - target_valid))
+    
+    # Relative error
+    rel_err = torch.mean(torch.abs(pred_valid - target_valid) / target_valid)
+    
+    # Threshold accuracy (a1 for gaze)
+    thresh = torch.maximum(pred_valid / target_valid, target_valid / pred_valid)
+    gaze_a1 = (thresh < 1.25).float().mean()
+    
+    return {
+        'gaze_mae': mae.item(),
+        'gaze_rel': rel_err.item(),
+        'gaze_a1': gaze_a1.item()
+    }
+
 
 def train_epoch(model, train_loader, optimizer, scheduler, loss_fns, epoch, 
                 writer, distributed, rank, world_size, model_ema=None, ema_decay=0.999):
@@ -348,12 +375,19 @@ def train_epoch(model, train_loader, optimizer, scheduler, loss_fns, epoch,
         # Compute metrics
         with torch.no_grad():
             metrics = compute_metrics(pred_depth.squeeze(1), depth_gt, valid_mask)
+            gaze_metrics = compute_gaze_metrics(pred_gaze_depth.squeeze(-1), gaze_depth_gt, 
+                                                 (gaze_depth_gt > 0).float())
             
         # Accumulate
         total_loss += loss.item() * context_rgb.size(0)
         total_samples += context_rgb.size(0)
         
         for k, v in metrics.items():
+            if k not in metrics_sum:
+                metrics_sum[k] = 0
+            metrics_sum[k] += v * context_rgb.size(0)
+            
+        for k, v in gaze_metrics.items():
             if k not in metrics_sum:
                 metrics_sum[k] = 0
             metrics_sum[k] += v * context_rgb.size(0)
@@ -365,12 +399,15 @@ def train_epoch(model, train_loader, optimizer, scheduler, loss_fns, epoch,
             avg_abs_rel = metrics_sum.get('abs_rel', 0) / total_samples
             avg_rmse = metrics_sum.get('rmse', 0) / total_samples
             avg_a1 = metrics_sum.get('a1', 0) / total_samples
+            avg_gaze_rel = metrics_sum.get('gaze_rel', 0) / total_samples
+            avg_gaze_a1 = metrics_sum.get('gaze_a1', 0) / total_samples
             
             pbar.set_postfix({
                 'Loss': f'{avg_loss:.4f}',
                 'AbsRel': f'{avg_abs_rel:.3f}',
-                'RMSE': f'{avg_rmse:.3f}',
-                'a1': f'{avg_a1:.3f}'
+                'a1': f'{avg_a1:.3f}',
+                'GazeRel': f'{avg_gaze_rel:.3f}',
+                'Gaze_a1': f'{avg_gaze_a1:.3f}'
             })
             pbar.update(1)
     
@@ -398,7 +435,10 @@ def train_epoch(model, train_loader, optimizer, scheduler, loss_fns, epoch,
         writer.add_scalar('train/si_log_loss', si_log_loss.item(), epoch)
         writer.add_scalar('train/learning_rate', optimizer.param_groups[0]['lr'], epoch)
         for k, v in avg_metrics.items():
-            writer.add_scalar(f'train/{k}', v, epoch)
+            if 'gaze' in k:
+                writer.add_scalar(f'train/gaze/{k}', v, epoch)
+            else:
+                writer.add_scalar(f'train/{k}', v, epoch)
             
     return avg_loss, avg_metrics
 
@@ -495,6 +535,8 @@ def validate(model, val_loader, loss_fns, epoch, writer, distributed, rank, worl
             
             # Compute metrics
             metrics = compute_metrics(pred_depth.squeeze(1), depth_gt, valid_mask)
+            gaze_metrics = compute_gaze_metrics(pred_gaze_depth.squeeze(-1), gaze_depth_gt,
+                                                 (gaze_depth_gt > 0).float())
             
             # Accumulate
             total_loss += loss.item() * context_rgb.size(0)
@@ -504,16 +546,25 @@ def validate(model, val_loader, loss_fns, epoch, writer, distributed, rank, worl
                 if k not in metrics_sum:
                     metrics_sum[k] = 0
                 metrics_sum[k] += v * context_rgb.size(0)
+                
+            for k, v in gaze_metrics.items():
+                if k not in metrics_sum:
+                    metrics_sum[k] = 0
+                metrics_sum[k] += v * context_rgb.size(0)
             
             # Update progress bar
             if rank == 0:
                 avg_loss = total_loss / total_samples if total_samples > 0 else 0
                 avg_abs_rel = metrics_sum.get('abs_rel', 0) / total_samples if total_samples > 0 else 0
                 avg_a1 = metrics_sum.get('a1', 0) / total_samples if total_samples > 0 else 0
+                avg_gaze_rel = metrics_sum.get('gaze_rel', 0) / total_samples if total_samples > 0 else 0
+                avg_gaze_a1 = metrics_sum.get('gaze_a1', 0) / total_samples if total_samples > 0 else 0
                 pbar.set_postfix({
                     'Loss': f'{avg_loss:.4f}',
                     'AbsRel': f'{avg_abs_rel:.3f}',
-                    'a1': f'{avg_a1:.3f}'
+                    'a1': f'{avg_a1:.3f}',
+                    'GazeRel': f'{avg_gaze_rel:.3f}',
+                    'Gaze_a1': f'{avg_gaze_a1:.3f}'
                 })
                 pbar.update(1)
     
@@ -536,7 +587,10 @@ def validate(model, val_loader, loss_fns, epoch, writer, distributed, rank, worl
     if rank == 0 and writer is not None:
         writer.add_scalar('val/loss', avg_loss, epoch)
         for k, v in avg_metrics.items():
-            writer.add_scalar(f'val/{k}', v, epoch)
+            if 'gaze' in k:
+                writer.add_scalar(f'val/gaze/{k}', v, epoch)
+            else:
+                writer.add_scalar(f'val/{k}', v, epoch)
             
     return avg_loss, avg_metrics
 
@@ -789,12 +843,21 @@ def main():
         # Print epoch summary
         if rank == 0:
             print(f"\nEpoch {epoch} Summary:")
-            print(f"  Train Loss: {train_loss:.4f}, AbsRel: {train_metrics['abs_rel']:.3f}, "
-                  f"RMSE: {train_metrics['rmse']:.3f}, a1: {train_metrics['a1']:.3f}")
-            print(f"  Val Loss: {val_loss:.4f}, AbsRel: {val_metrics['abs_rel']:.3f}, "
-                  f"RMSE: {val_metrics['rmse']:.3f}, a1: {val_metrics['a1']:.3f}")
-            print(f"  EMA Val Loss: {ema_val_loss:.4f}, AbsRel: {ema_val_metrics['abs_rel']:.3f}, "
-                  f"RMSE: {ema_val_metrics['rmse']:.3f}, a1: {ema_val_metrics['a1']:.3f}")
+            print(f"  Train - Patch: Loss={train_loss:.4f}, AbsRel={train_metrics['abs_rel']:.3f}, "
+                  f"a1={train_metrics['a1']:.3f}")
+            print(f"        - Gaze:  MAE={train_metrics.get('gaze_mae', 0):.3f}m, "
+                  f"RelErr={train_metrics.get('gaze_rel', 0):.3f}, "
+                  f"a1={train_metrics.get('gaze_a1', 0):.3f}")
+            print(f"  Val   - Patch: Loss={val_loss:.4f}, AbsRel={val_metrics['abs_rel']:.3f}, "
+                  f"a1={val_metrics['a1']:.3f}")
+            print(f"        - Gaze:  MAE={val_metrics.get('gaze_mae', 0):.3f}m, "
+                  f"RelErr={val_metrics.get('gaze_rel', 0):.3f}, "
+                  f"a1={val_metrics.get('gaze_a1', 0):.3f}")
+            print(f"  EMA   - Patch: Loss={ema_val_loss:.4f}, AbsRel={ema_val_metrics['abs_rel']:.3f}, "
+                  f"a1={ema_val_metrics['a1']:.3f}")
+            print(f"        - Gaze:  MAE={ema_val_metrics.get('gaze_mae', 0):.3f}m, "
+                  f"RelErr={ema_val_metrics.get('gaze_rel', 0):.3f}, "
+                  f"a1={ema_val_metrics.get('gaze_a1', 0):.3f}")
                   
         # Save checkpoint
         if rank == 0:
