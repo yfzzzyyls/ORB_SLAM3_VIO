@@ -44,6 +44,8 @@ def parse_args():
                         help='Save visualization to file')
     parser.add_argument('--device', type=str, default='cuda',
                         help='Device to use (cuda or cpu)')
+    parser.add_argument('--patch-coverage', type=int, default=88,
+                        help='Size of region to extract before downsampling to 88x88 (default: 88, try: 352)')
     
     return parser.parse_args()
 
@@ -125,13 +127,20 @@ def extract_patch_float(image_tensor, gaze_x, gaze_y, patch_size, original_size=
         raise ValueError("Only tensor inputs supported")
 
 
-def preprocess_image(image_path, gaze_x, gaze_y):
-    """Load and preprocess image exactly as in training."""
+def preprocess_image(image_path, gaze_x, gaze_y, patch_coverage=88):
+    """Load and preprocess image exactly as in training.
+    
+    Args:
+        patch_coverage: Size of region to extract from original image before downsampling to 88x88.
+                       Default 88 means direct 88x88 extraction (original behavior).
+                       Larger values like 352 mean extract 352x352 then downsample to 88x88.
+    """
     
     # Load RGB image
     image = Image.open(image_path).convert('RGB')
     original_size = image.size  # (width, height)
     print(f"Original image size: {original_size[0]}×{original_size[1]}")
+    print(f"Patch coverage: {patch_coverage}×{patch_coverage} pixels ({patch_coverage/1408*100:.1f}% of image)")
     
     # Convert to tensor and normalize to [0, 1]
     rgb_tensor = TF.to_tensor(image)  # This normalizes to [0, 1]
@@ -140,8 +149,16 @@ def preprocess_image(image_path, gaze_x, gaze_y):
     context_rgb = TF.resize(rgb_tensor, [88, 88], 
                            interpolation=InterpolationMode.BILINEAR)
     
-    # Create patch: extract 88x88 crop at gaze using float coordinates
-    patch_rgb = extract_patch_float(rgb_tensor, gaze_x, gaze_y, 88, 1408)
+    # Create patch: extract larger region then downsample
+    if patch_coverage != 88:
+        # Extract larger patch
+        patch_large = extract_patch_float(rgb_tensor, gaze_x, gaze_y, patch_coverage, 1408)
+        # Downsample to 88x88
+        patch_rgb = TF.resize(patch_large, [88, 88], 
+                            interpolation=InterpolationMode.BILINEAR)
+    else:
+        # Original behavior: extract 88x88 directly
+        patch_rgb = extract_patch_float(rgb_tensor, gaze_x, gaze_y, 88, 1408)
     
     return context_rgb, patch_rgb, image
 
@@ -184,7 +201,7 @@ def main():
     print(f"\nProcessing image: {args.image}")
     print(f"Gaze location (pixels): ({args.gaze_x}, {args.gaze_y})")
     
-    context_rgb, patch_rgb, original_image = preprocess_image(args.image, args.gaze_x, args.gaze_y)
+    context_rgb, patch_rgb, original_image = preprocess_image(args.image, args.gaze_x, args.gaze_y, args.patch_coverage)
     
     # Load ground truth depth if available
     gt_depth = None
@@ -206,8 +223,10 @@ def main():
     
     print(f"Normalized gaze: ({gaze_x_norm:.3f}, {gaze_y_norm:.3f})")
     
-    # Run inference
+    # Run inference and measure latency
     print("\nRunning inference...")
+    import time
+    
     with torch.no_grad():
         # Prepare inputs
         context_batch = context_rgb.unsqueeze(0).to(device)
@@ -215,7 +234,26 @@ def main():
         gaze_x_tensor = torch.tensor([gaze_x_norm], dtype=torch.float32, device=device)
         gaze_y_tensor = torch.tensor([gaze_y_norm], dtype=torch.float32, device=device)
         
-        # Forward pass
+        # Warm up (first run is slower due to CUDA kernel compilation)
+        _ = model(context_batch, patch_batch, gaze_x_tensor, gaze_y_tensor)
+        if device.type == 'cuda':
+            torch.cuda.synchronize()
+        
+        # Measure latency over multiple runs
+        num_runs = 10 if device.type == 'cpu' else 100
+        if device.type == 'cuda':
+            torch.cuda.synchronize()
+        start_time = time.perf_counter()
+        
+        for _ in range(num_runs):
+            outputs = model(context_batch, patch_batch, gaze_x_tensor, gaze_y_tensor)
+            if device.type == 'cuda':
+                torch.cuda.synchronize()
+        
+        end_time = time.perf_counter()
+        avg_latency = (end_time - start_time) / num_runs * 1000  # Convert to ms
+        
+        # Get final outputs for visualization
         outputs = model(context_batch, patch_batch, gaze_x_tensor, gaze_y_tensor)
         
         # Extract predictions
@@ -230,6 +268,15 @@ def main():
         # Also show center pixel from 22x22 for comparison
         center_depth = depth_22x22[0, 0, 11, 11].item()
         print(f"Center pixel of 22x22: {center_depth:.3f}m (for reference)")
+        
+        # Print latency measurements
+        print("\n" + "="*50)
+        print("LATENCY MEASUREMENT")
+        print("="*50)
+        print(f"Device: {device}")
+        print(f"Average inference time: {avg_latency:.2f} ms")
+        print(f"FPS capability: {1000/avg_latency:.1f} fps")
+        print("="*50)
     
     # Compare with ground truth
     if gt_depth is not None:
