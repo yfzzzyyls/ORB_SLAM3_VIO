@@ -1,0 +1,314 @@
+(base) [external@eng-wl3181-lab-device-02 depthCNN]$ ./train_spatial_dual_resolution_coordconv.sh 4 ./checkpoints/spatial_dual_coordconv_max/checkpoint_latest.pth
+======================================
+🚀 Training Configuration
+======================================
+• Scheduler: cosine_restarts
+• Learning rate: 1e-4
+• Weight decay: 1e-4
+• Epochs: 100
+• Batch size per GPU: 32
+• Num workers: 8
+• WebDataset: ENABLED (fast I/O)
+• Shard directory: /home/external/adt_webdataset_shards
+• SWA: Disabled
+• TTA: Auto-enabled after epoch 50
+======================================
+Training on 4 GPUs with DDP
+Total batch size: 128
+Learning rate: 1e-4
+Resuming from checkpoint: ./checkpoints/spatial_dual_coordconv_max/checkpoint_latest.pth
+Saving output to: ./logs/spatial_dual_coordconv/training_20250822_224559.log
+W0822 22:46:00.381487 139773982488384 torch/distributed/run.py:779] 
+W0822 22:46:00.381487 139773982488384 torch/distributed/run.py:779] *****************************************
+W0822 22:46:00.381487 139773982488384 torch/distributed/run.py:779] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0822 22:46:00.381487 139773982488384 torch/distributed/run.py:779] *****************************************
+2025-08-22 22:46:01.560500: I tensorflow/core/util/port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+2025-08-22 22:46:01.560501: I tensorflow/core/util/port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+2025-08-22 22:46:01.560500: I tensorflow/core/util/port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+2025-08-22 22:46:01.560508: I tensorflow/core/util/port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+2025-08-22 22:46:01.572642: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:477] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+2025-08-22 22:46:01.572643: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:477] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+2025-08-22 22:46:01.572643: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:477] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+2025-08-22 22:46:01.572653: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:477] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+E0000 00:00:1755917161.585226 1304063 cuda_dnn.cc:8310] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+E0000 00:00:1755917161.585225 1304064 cuda_dnn.cc:8310] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+E0000 00:00:1755917161.585291 1304062 cuda_dnn.cc:8310] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+E0000 00:00:1755917161.585329 1304065 cuda_dnn.cc:8310] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+E0000 00:00:1755917161.588643 1304065 cuda_blas.cc:1418] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+E0000 00:00:1755917161.588647 1304063 cuda_blas.cc:1418] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+E0000 00:00:1755917161.588644 1304064 cuda_blas.cc:1418] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+E0000 00:00:1755917161.588647 1304062 cuda_blas.cc:1418] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+2025-08-22 22:46:01.602662: I tensorflow/core/platform/cpu_feature_guard.cc:210] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
+To enable the following instructions: AVX2 AVX512F AVX512_VNNI AVX512_BF16 AVX512_FP16 AVX_VNNI AMX_TILE AMX_INT8 AMX_BF16 FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
+2025-08-22 22:46:01.602662: I tensorflow/core/platform/cpu_feature_guard.cc:210] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
+To enable the following instructions: AVX2 AVX512F AVX512_VNNI AVX512_BF16 AVX512_FP16 AVX_VNNI AMX_TILE AMX_INT8 AMX_BF16 FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
+2025-08-22 22:46:01.602662: I tensorflow/core/platform/cpu_feature_guard.cc:210] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
+To enable the following instructions: AVX2 AVX512F AVX512_VNNI AVX512_BF16 AVX512_FP16 AVX_VNNI AMX_TILE AMX_INT8 AMX_BF16 FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
+2025-08-22 22:46:01.605479: I tensorflow/core/platform/cpu_feature_guard.cc:210] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
+To enable the following instructions: AVX2 AVX512F AVX512_VNNI AVX512_BF16 AVX512_FP16 AVX_VNNI AMX_TILE AMX_INT8 AMX_BF16 FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
+/home/external/.local/lib/python3.9/site-packages/webdataset/compat.py:136: UserWarning: WebDataset(shardshuffle=...) is None; set explicitly to False or a number
+  warnings.warn("WebDataset(shardshuffle=...) is None; set explicitly to False or a number")
+/home/external/.local/lib/python3.9/site-packages/webdataset/compat.py:136: UserWarning: WebDataset(shardshuffle=...) is None; set explicitly to False or a number
+  warnings.warn("WebDataset(shardshuffle=...) is None; set explicitly to False or a number")
+/home/external/.local/lib/python3.9/site-packages/webdataset/compat.py:136: UserWarning: WebDataset(shardshuffle=...) is None; set explicitly to False or a number
+  warnings.warn("WebDataset(shardshuffle=...) is None; set explicitly to False or a number")
+/home/external/.local/lib/python3.9/site-packages/webdataset/compat.py:136: UserWarning: WebDataset(shardshuffle=...) is None; set explicitly to False or a number
+  warnings.warn("WebDataset(shardshuffle=...) is None; set explicitly to False or a number")
+No shards found at /home/external/adt_webdataset_shards/val_*.tar
+Failed to create WebDataset loaders, falling back to regular dataset
+No shards found at /home/external/adt_webdataset_shards/val_*.tar
+Failed to create WebDataset loaders, falling back to regular dataset
+No shards found at /home/external/adt_webdataset_shards/val_*.tar
+No shards found at /home/external/adt_webdataset_shards/val_*.tar
+Failed to create WebDataset loaders, falling back to regular dataset
+Failed to create WebDataset loaders, falling back to regular dataset
+[train] Using all 79 sequences
+[train] Using all 79 sequences
+[train] Using all 79 sequences
+[train] Using all 79 sequences
+Found 220099 samples for train split
+Will sample 15 extra points per image using stratified 4x4 grid
+Found 220099 samples for train split
+Will sample 15 extra points per image using stratified 4x4 grid
+Found 220099 samples for train split
+Will sample 15 extra points per image using stratified 4x4 grid
+Found 220099 samples for train split
+Will sample 15 extra points per image using stratified 4x4 grid
+[val] Using all 7 sequences
+[val] Using all 7 sequences[val] Using all 7 sequences
+
+[val] Using all 7 sequences
+Found 19364 samples for val split
+Found 19364 samples for val split
+Found 19364 samples for val split
+Found 19364 samples for val split
+/home/external/ORB_SLAM3_VIO/depthCNN/train_spatial_dual_resolution_coordconv.py:1044: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  checkpoint = torch.load(args.resume, map_location='cpu')
+/home/external/ORB_SLAM3_VIO/depthCNN/train_spatial_dual_resolution_coordconv.py:1044: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  checkpoint = torch.load(args.resume, map_location='cpu')
+/home/external/ORB_SLAM3_VIO/depthCNN/train_spatial_dual_resolution_coordconv.py:1044: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  checkpoint = torch.load(args.resume, map_location='cpu')
+/home/external/ORB_SLAM3_VIO/depthCNN/train_spatial_dual_resolution_coordconv.py:1044: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  checkpoint = torch.load(args.resume, map_location='cpu')
+EMA weights re-loaded
+Resumed from epoch 10
+
+========================================
+TRAINING RESUMED FROM EPOCH 10
+========================================
+
+Epoch [10]: 100%|██████████| 27512/27512 [5:19:26<00:00,  1.44it/s, Loss=0.3966, AbsRel=0.132, a1=0.863, GazeRel=0.118, Gaze_a1=0.891]  
+Val [10]: 100%|██████████| 152/152 [01:25<00:00,  1.77it/s, Loss=0.5727, AbsRel=0.144, a1=0.871, GazeRel=0.134, Gaze_a1=0.893]
+Val [10]: 100%|██████████| 152/152 [01:05<00:00,  2.32it/s, Loss=0.5358, AbsRel=0.142, a1=0.881, GazeRel=0.131, Gaze_a1=0.903]
+
+Epoch 10 Summary:
+  Train - Patch: Loss=0.3974, AbsRel=0.132, a1=0.863
+        - Gaze:  MAE=0.187m, RelErr=0.117, a1=0.891
+  Val   - Patch: Loss=0.5802, AbsRel=0.145, a1=0.871
+        - Gaze:  MAE=0.265m, RelErr=0.137, a1=0.891
+  EMA   - Patch: Loss=0.5419, AbsRel=0.142, a1=0.881
+        - Gaze:  MAE=0.250m, RelErr=0.133, a1=0.903
+  New best model saved (ema_val_loss: 0.5419)
+
+Epoch [11]: 100%|██████████| 27512/27512 [4:59:15<00:00,  1.53it/s, Loss=0.3675, AbsRel=0.125, a1=0.874, GazeRel=0.110, Gaze_a1=0.901]  
+Val [11]: 100%|██████████| 152/152 [01:25<00:00,  1.77it/s, Loss=0.5312, AbsRel=0.140, a1=0.876, GazeRel=0.126, Gaze_a1=0.901]
+Val [11]: 100%|██████████| 152/152 [01:05<00:00,  2.32it/s, Loss=0.5376, AbsRel=0.140, a1=0.883, GazeRel=0.129, Gaze_a1=0.906]
+
+Epoch 11 Summary:
+  Train - Patch: Loss=0.3677, AbsRel=0.125, a1=0.874
+        - Gaze:  MAE=0.176m, RelErr=0.110, a1=0.900
+  Val   - Patch: Loss=0.5421, AbsRel=0.141, a1=0.876
+        - Gaze:  MAE=0.248m, RelErr=0.130, a1=0.898
+  EMA   - Patch: Loss=0.5475, AbsRel=0.141, a1=0.883
+        - Gaze:  MAE=0.253m, RelErr=0.133, a1=0.904
+
+Epoch [12]: 100%|██████████| 27512/27512 [4:58:15<00:00,  1.54it/s, Loss=0.3457, AbsRel=0.120, a1=0.881, GazeRel=0.105, Gaze_a1=0.907]  
+Val [12]: 100%|██████████| 152/152 [01:25<00:00,  1.77it/s, Loss=0.5524, AbsRel=0.142, a1=0.886, GazeRel=0.133, Gaze_a1=0.910]
+Val [12]: 100%|██████████| 152/152 [01:06<00:00,  2.29it/s, Loss=0.5333, AbsRel=0.138, a1=0.888, GazeRel=0.128, Gaze_a1=0.911]
+
+Epoch 12 Summary:
+  Train - Patch: Loss=0.3451, AbsRel=0.120, a1=0.881
+        - Gaze:  MAE=0.168m, RelErr=0.105, a1=0.907
+  Val   - Patch: Loss=0.5604, AbsRel=0.143, a1=0.884
+        - Gaze:  MAE=0.260m, RelErr=0.137, a1=0.904
+  EMA   - Patch: Loss=0.5422, AbsRel=0.139, a1=0.887
+        - Gaze:  MAE=0.252m, RelErr=0.131, a1=0.907
+
+Epoch [13]: 100%|██████████| 27512/27512 [4:58:34<00:00,  1.54it/s, Loss=0.3290, AbsRel=0.117, a1=0.887, GazeRel=0.101, Gaze_a1=0.912]  
+Val [13]: 100%|██████████| 152/152 [01:22<00:00,  1.85it/s, Loss=0.5291, AbsRel=0.138, a1=0.888, GazeRel=0.127, Gaze_a1=0.912]
+Val [13]: 100%|██████████| 152/152 [01:06<00:00,  2.30it/s, Loss=0.5361, AbsRel=0.136, a1=0.891, GazeRel=0.127, Gaze_a1=0.914]
+
+Epoch 13 Summary:
+  Train - Patch: Loss=0.3282, AbsRel=0.117, a1=0.887
+        - Gaze:  MAE=0.161m, RelErr=0.101, a1=0.912
+  Val   - Patch: Loss=0.5365, AbsRel=0.138, a1=0.887
+        - Gaze:  MAE=0.249m, RelErr=0.131, a1=0.907
+  EMA   - Patch: Loss=0.5440, AbsRel=0.137, a1=0.891
+        - Gaze:  MAE=0.254m, RelErr=0.130, a1=0.910
+
+Epoch [14]: 100%|██████████| 27512/27512 [4:57:45<00:00,  1.54it/s, Loss=0.3086, AbsRel=0.113, a1=0.893, GazeRel=0.097, Gaze_a1=0.917]  
+Val [14]: 100%|██████████| 152/152 [01:25<00:00,  1.77it/s, Loss=0.5383, AbsRel=0.141, a1=0.885, GazeRel=0.129, Gaze_a1=0.907]
+Val [14]: 100%|██████████| 152/152 [01:06<00:00,  2.30it/s, Loss=0.5334, AbsRel=0.136, a1=0.893, GazeRel=0.127, Gaze_a1=0.914]
+
+Epoch 14 Summary:
+  Train - Patch: Loss=0.3090, AbsRel=0.113, a1=0.893
+        - Gaze:  MAE=0.156m, RelErr=0.097, a1=0.917
+  Val   - Patch: Loss=0.5431, AbsRel=0.141, a1=0.884
+        - Gaze:  MAE=0.251m, RelErr=0.133, a1=0.903
+  EMA   - Patch: Loss=0.5397, AbsRel=0.137, a1=0.892
+        - Gaze:  MAE=0.251m, RelErr=0.130, a1=0.911
+  New best model saved (ema_val_loss: 0.5397)
+
+Epoch [15]: 100%|██████████| 27512/27512 [4:59:07<00:00,  1.53it/s, Loss=0.2943, AbsRel=0.110, a1=0.897, GazeRel=0.094, Gaze_a1=0.921]  
+Val [15]: 100%|██████████| 152/152 [01:25<00:00,  1.77it/s, Loss=0.5405, AbsRel=0.140, a1=0.889, GazeRel=0.130, Gaze_a1=0.911]
+Val [15]: 100%|██████████| 152/152 [01:06<00:00,  2.30it/s, Loss=0.5352, AbsRel=0.134, a1=0.895, GazeRel=0.125, Gaze_a1=0.917]
+
+Epoch 15 Summary:
+  Train - Patch: Loss=0.2944, AbsRel=0.110, a1=0.897
+        - Gaze:  MAE=0.151m, RelErr=0.094, a1=0.921
+  Val   - Patch: Loss=0.5434, AbsRel=0.140, a1=0.888
+        - Gaze:  MAE=0.251m, RelErr=0.134, a1=0.907
+  EMA   - Patch: Loss=0.5395, AbsRel=0.135, a1=0.894
+        - Gaze:  MAE=0.243m, RelErr=0.128, a1=0.914
+  New best model saved (ema_val_loss: 0.5395)
+
+Epoch [16]:  90%|████████▉ | 24661/27512 [4:27:54<31:17,  1.52it/s, Loss=0.2812, AbsRel=0.108, a1=0.901, GazeRel=0.092, Gaze_a1=0.924]
+
+========================================
+KEY OBSERVATIONS - UPDATED
+========================================
+1. Training continues to improve steadily through epoch 16:
+   - abs_rel: 0.132 → 0.108 (epochs 10-16 current)
+   - a1: 0.863 → 0.901
+   - gaze_a1: 0.891 → 0.924
+
+2. Best EMA models saved:
+   - Epoch 10: EMA val loss 0.5419
+   - Epoch 14: EMA val loss 0.5397 (NEW BEST)
+   - Epoch 15: EMA val loss 0.5395 (NEW BEST)
+
+3. Validation metrics keep improving despite loss fluctuation:
+   - EMA abs_rel: 0.142 → 0.135 (epochs 10-15)
+   - EMA a1: 0.881 → 0.894
+   - EMA gaze_a1: 0.903 → 0.914
+
+4. Currently on Epoch 16 at 90% completion (24661/27512)
+
+========================================
+IMPORTANT NOTE ON "BEST MODEL" CRITERIA
+========================================
+The training script saves "best" based on val_loss, not accuracy metrics.
+While epochs 11-15 show better abs_rel and a1, their loss is slightly higher.
+This is why epoch 10 was initially "best", but now epochs 14 and 15 are saved
+as they achieved lower validation loss (0.5397 and 0.5395 respectively).
+
+Consider modifying the script to save based on abs_rel or a1 instead of loss
+for more meaningful "best" checkpoints.
+
+========================================
+PERFORMANCE SUMMARY
+========================================
+Best metrics achieved so far (EMA, Epoch 15):
+• abs_rel: 0.135 (13.5% error - excellent!)
+• a1: 0.894 (89.4% within threshold)
+• gaze_rel: 0.128 (12.8% error at gaze)
+• gaze_a1: 0.914 (91.4% accuracy at gaze)
+
+Training speed: ~1.52-1.54 it/s consistent
+Using stratified 4x4 grid sampling (replaced edge-biased)
+
+========================================
+FILES
+========================================
+- Checkpoint directory: ./checkpoints/spatial_dual_coordconv_max/
+- Primary log: ./logs/spatial_dual_coordconv/training_20250822_224559.log
+- This manual log: ./checkpoints/spatial_dual_coordconv_max/training_resumed_20250822.log
+- Last updated: Epoch 16 at 90% completion
+========================================
+Training Progress Summary (Epochs 26-35)
+========================================
+
+Epoch [26/100] - [01/18 03:26:09]:
+  Train - Patch: Loss=0.2520, AbsRel=0.100, a1=0.915
+        - Gaze:  MAE=0.137m, RelErr=0.086, a1=0.935
+  Val   - Patch: Loss=0.5408, AbsRel=0.131, a1=0.906
+        - Gaze:  MAE=0.259m, RelErr=0.133, a1=0.919
+  EMA   - Patch: Loss=0.5457, AbsRel=0.131, a1=0.907
+        - Gaze:  MAE=0.260m, RelErr=0.133, a1=0.919
+
+Epoch [27/100] - [01/18 03:49:44]:
+  Train - Patch: Loss=0.2488, AbsRel=0.098, a1=0.916
+        - Gaze:  MAE=0.135m, RelErr=0.085, a1=0.937
+  Val   - Patch: Loss=0.5370, AbsRel=0.129, a1=0.907
+        - Gaze:  MAE=0.257m, RelErr=0.130, a1=0.923
+  EMA   - Patch: Loss=0.5442, AbsRel=0.130, a1=0.907
+        - Gaze:  MAE=0.260m, RelErr=0.132, a1=0.921
+
+Epoch [28/100] - [01/18 04:13:18]:
+  Train - Patch: Loss=0.2479, AbsRel=0.098, a1=0.917
+        - Gaze:  MAE=0.133m, RelErr=0.084, a1=0.937
+  Val   - Patch: Loss=0.5414, AbsRel=0.130, a1=0.906
+        - Gaze:  MAE=0.259m, RelErr=0.131, a1=0.922
+  EMA   - Patch: Loss=0.5465, AbsRel=0.131, a1=0.906
+        - Gaze:  MAE=0.261m, RelErr=0.133, a1=0.920
+
+Epoch [29/100] - [01/18 04:36:52]:
+  Train - Patch: Loss=0.2452, AbsRel=0.097, a1=0.918
+        - Gaze:  MAE=0.132m, RelErr=0.083, a1=0.938
+  Val   - Patch: Loss=0.5411, AbsRel=0.128, a1=0.907
+        - Gaze:  MAE=0.259m, RelErr=0.130, a1=0.923
+  EMA   - Patch: Loss=0.5463, AbsRel=0.130, a1=0.907
+        - Gaze:  MAE=0.261m, RelErr=0.131, a1=0.922
+
+Epoch [30/100] - [01/18 05:00:28]:
+  Train - Patch: Loss=0.2453, AbsRel=0.097, a1=0.918
+        - Gaze:  MAE=0.131m, RelErr=0.082, a1=0.939
+  Val   - Patch: Loss=0.5417, AbsRel=0.130, a1=0.908
+        - Gaze:  MAE=0.260m, RelErr=0.130, a1=0.922
+  EMA   - Patch: Loss=0.5486, AbsRel=0.131, a1=0.907
+        - Gaze:  MAE=0.262m, RelErr=0.132, a1=0.922
+
+Epoch [31/100] - [01/18 05:24:02]:
+  Train - Patch: Loss=0.2425, AbsRel=0.096, a1=0.919
+        - Gaze:  MAE=0.131m, RelErr=0.082, a1=0.939
+  Val   - Patch: Loss=0.5407, AbsRel=0.129, a1=0.909
+        - Gaze:  MAE=0.260m, RelErr=0.131, a1=0.924
+  EMA   - Patch: Loss=0.5476, AbsRel=0.130, a1=0.908
+        - Gaze:  MAE=0.262m, RelErr=0.132, a1=0.923
+
+Epoch [32/100] - [01/18 05:47:36]:
+  Train - Patch: Loss=0.2432, AbsRel=0.096, a1=0.918
+        - Gaze:  MAE=0.132m, RelErr=0.082, a1=0.939
+  Val   - Patch: Loss=0.5450, AbsRel=0.129, a1=0.908
+        - Gaze:  MAE=0.261m, RelErr=0.131, a1=0.923
+  EMA   - Patch: Loss=0.5509, AbsRel=0.130, a1=0.908
+        - Gaze:  MAE=0.263m, RelErr=0.132, a1=0.923
+
+Epoch [33/100] - [01/18 06:11:11]:
+  Train - Patch: Loss=0.2427, AbsRel=0.096, a1=0.919
+        - Gaze:  MAE=0.131m, RelErr=0.082, a1=0.939
+  Val   - Patch: Loss=0.5419, AbsRel=0.129, a1=0.909
+        - Gaze:  MAE=0.260m, RelErr=0.130, a1=0.924
+  EMA   - Patch: Loss=0.5491, AbsRel=0.130, a1=0.909
+        - Gaze:  MAE=0.262m, RelErr=0.131, a1=0.924
+
+Epoch [34/100] - [01/18 06:34:45]:
+  Train - Patch: Loss=0.2412, AbsRel=0.095, a1=0.920
+        - Gaze:  MAE=0.130m, RelErr=0.081, a1=0.940
+  Val   - Patch: Loss=0.5394, AbsRel=0.125, a1=0.912
+        - Gaze:  MAE=0.259m, RelErr=0.128, a1=0.928
+  EMA   - Patch: Loss=0.5482, AbsRel=0.127, a1=0.911
+        - Gaze:  MAE=0.263m, RelErr=0.130, a1=0.929
+  🎯 New best model saved! (gaze_a1: 0.929)
+  📊 New best abs_rel saved! (abs_rel: 0.127)
+
+========================================
+Best Checkpoint Summary:
+========================================
+Best gaze_a1: 0.929 (Epoch 34)
+Best abs_rel: 0.127 (Epoch 34)
+========================================
