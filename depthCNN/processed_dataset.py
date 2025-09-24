@@ -21,18 +21,21 @@ class ProcessedADTDataset(Dataset):
         self,
         data_root: str,
         split: str = 'train',
-        transform=None
+        transform=None,
+        max_sequences: int = None
     ):
         """
         Args:
             data_root: Root directory containing train/val/test folders
             split: 'train', 'val', or 'test'
             transform: Optional transforms to apply
+            max_sequences: Maximum number of sequences to use (None for all)
         """
         self.data_root = Path(data_root)
         self.split = split
         self.transform = transform
         self.split_dir = self.data_root / split
+        self.max_sequences = max_sequences
         
         # Check if data exists
         if not self.split_dir.exists():
@@ -47,8 +50,14 @@ class ProcessedADTDataset(Dataset):
         # Get all sequence directories
         seq_dirs = sorted([d for d in self.split_dir.iterdir() if d.is_dir()])
         
+        # Limit sequences if requested
+        if self.max_sequences is not None and len(seq_dirs) > self.max_sequences:
+            seq_dirs = seq_dirs[:self.max_sequences]
+        
         print(f"\nLoading {self.split} dataset from {self.split_dir}")
-        print(f"Found {len(seq_dirs)} sequences")
+        print(f"Found {len(seq_dirs)} sequences" + 
+              (f" (limited from {sum(1 for d in self.split_dir.iterdir() if d.is_dir())})" 
+               if self.max_sequences is not None else ""))
         
         for seq_dir in seq_dirs:
             # Load metadata

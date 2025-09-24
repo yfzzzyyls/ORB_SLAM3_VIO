@@ -197,11 +197,27 @@ def main():
     # Load model
     model = load_model(args.checkpoint, device, args.use_ema)
     
-    # Preprocess image
+    # Preprocess image and measure time
     print(f"\nProcessing image: {args.image}")
     print(f"Gaze location (pixels): ({args.gaze_x}, {args.gaze_y})")
     
+    import time
+    
+    # First, load image separately to measure just the I/O
+    load_start = time.perf_counter()
+    from PIL import Image
+    image = Image.open(args.image).convert('RGB')
+    load_end = time.perf_counter()
+    image_load_time = (load_end - load_start) * 1000  # ms
+    
+    # Now measure preprocessing with pre-loaded image
+    preprocess_start = time.perf_counter()
     context_rgb, patch_rgb, original_image = preprocess_image(args.image, args.gaze_x, args.gaze_y, args.patch_coverage)
+    preprocess_end = time.perf_counter()
+    preprocess_time_total = (preprocess_end - preprocess_start) * 1000  # Convert to ms
+    
+    # Preprocessing without I/O (approximate)
+    preprocess_time = preprocess_time_total - image_load_time
     
     # Load ground truth depth if available
     gt_depth = None
@@ -225,36 +241,101 @@ def main():
     
     # Run inference and measure latency
     print("\nRunning inference...")
-    import time
     
     with torch.no_grad():
-        # Prepare inputs
+        # Measure GPU preprocessing if image was already a tensor on GPU
+        # Simulate what would happen in AR/VR where image is already on GPU
+        rgb_tensor = TF.to_tensor(image).to(device)  # Simulate image already on GPU
+        
+        # First measure with grid creation (one-time cost)
+        if device.type == 'cuda':
+            torch.cuda.synchronize()
+        gpu_preprocess_start = time.perf_counter()
+        
+        # Context: downsample on GPU
+        context_gpu = F.interpolate(rgb_tensor.unsqueeze(0), size=(88, 88), 
+                                   mode='bilinear', align_corners=False).squeeze(0)
+        
+        # Patch: extract on GPU  
+        patch_size = 88
+        half = patch_size / 2.0
+        gaze_x_float = torch.tensor(args.gaze_x, dtype=torch.float32, device=device)
+        gaze_y_float = torch.tensor(args.gaze_y, dtype=torch.float32, device=device)
+        
+        y_coords = torch.linspace(-half + 0.5, half - 0.5, patch_size, device=device)
+        x_coords = torch.linspace(-half + 0.5, half - 0.5, patch_size, device=device)
+        grid_y, grid_x = torch.meshgrid(y_coords, x_coords, indexing='ij')
+        
+        grid_x = 2.0 * (grid_x + gaze_x_float + 0.5) / 1408 - 1.0
+        grid_y = 2.0 * (grid_y + gaze_y_float + 0.5) / 1408 - 1.0
+        grid = torch.stack([grid_x, grid_y], dim=-1).unsqueeze(0)
+        
+        patch_gpu = F.grid_sample(rgb_tensor.unsqueeze(0), grid, mode='bilinear',
+                                 padding_mode='reflection', align_corners=False).squeeze(0)
+        
+        if device.type == 'cuda':
+            torch.cuda.synchronize()
+        gpu_preprocess_end = time.perf_counter()
+        gpu_preprocess_time = (gpu_preprocess_end - gpu_preprocess_start) * 1000
+        
+        # Now measure optimized version with precomputed grid (what AR/VR would use)
+        # Grid is already computed above, so just measure the actual operations
+        if device.type == 'cuda':
+            torch.cuda.synchronize()
+        optimized_start = time.perf_counter()
+        
+        # Just the actual preprocessing operations
+        context_opt = F.interpolate(rgb_tensor.unsqueeze(0), size=(88, 88), 
+                                   mode='bilinear', align_corners=False).squeeze(0)
+        patch_opt = F.grid_sample(rgb_tensor.unsqueeze(0), grid, mode='bilinear',
+                                 padding_mode='reflection', align_corners=False).squeeze(0)
+        
+        if device.type == 'cuda':
+            torch.cuda.synchronize()
+        optimized_end = time.perf_counter()
+        gpu_preprocess_optimized = (optimized_end - optimized_start) * 1000
+        
+        # Prepare inputs and measure CPU->GPU transfer time
+        transfer_start = time.perf_counter()
         context_batch = context_rgb.unsqueeze(0).to(device)
         patch_batch = patch_rgb.unsqueeze(0).to(device)
         gaze_x_tensor = torch.tensor([gaze_x_norm], dtype=torch.float32, device=device)
         gaze_y_tensor = torch.tensor([gaze_y_norm], dtype=torch.float32, device=device)
+        if device.type == 'cuda':
+            torch.cuda.synchronize()
+        transfer_end = time.perf_counter()
+        transfer_time = (transfer_end - transfer_start) * 1000  # Convert to ms
         
         # Warm up (first run is slower due to CUDA kernel compilation)
         _ = model(context_batch, patch_batch, gaze_x_tensor, gaze_y_tensor)
         if device.type == 'cuda':
             torch.cuda.synchronize()
         
-        # Measure latency over multiple runs
+        # Measure the actual inference for this single run
+        if device.type == 'cuda':
+            torch.cuda.synchronize()
+        inference_start = time.perf_counter()
+        
+        outputs = model(context_batch, patch_batch, gaze_x_tensor, gaze_y_tensor)
+        
+        if device.type == 'cuda':
+            torch.cuda.synchronize()
+        inference_end = time.perf_counter()
+        single_inference_time = (inference_end - inference_start) * 1000  # Convert to ms
+        
+        # Also measure average for reference (optional)
         num_runs = 10 if device.type == 'cpu' else 100
         if device.type == 'cuda':
             torch.cuda.synchronize()
         start_time = time.perf_counter()
         
         for _ in range(num_runs):
-            outputs = model(context_batch, patch_batch, gaze_x_tensor, gaze_y_tensor)
+            _ = model(context_batch, patch_batch, gaze_x_tensor, gaze_y_tensor)
             if device.type == 'cuda':
                 torch.cuda.synchronize()
         
         end_time = time.perf_counter()
         avg_latency = (end_time - start_time) / num_runs * 1000  # Convert to ms
-        
-        # Get final outputs for visualization
-        outputs = model(context_batch, patch_batch, gaze_x_tensor, gaze_y_tensor)
         
         # Extract predictions
         depth_22x22 = outputs[0]  # [1, 1, 22, 22] dense depth map
@@ -274,8 +355,29 @@ def main():
         print("LATENCY MEASUREMENT")
         print("="*50)
         print(f"Device: {device}")
-        print(f"Average inference time: {avg_latency:.2f} ms")
-        print(f"FPS capability: {1000/avg_latency:.1f} fps")
+        print(f"\nCurrent pipeline (from disk):")
+        print(f"  Image loading:           {image_load_time:.2f} ms")
+        print(f"  CPU preprocessing:       {preprocess_time:.2f} ms")
+        print(f"  CPU->GPU transfer:       {transfer_time:.2f} ms")
+        print(f"  Model inference:         {avg_latency:.2f} ms")
+        print(f"  Total:                   {image_load_time + preprocess_time + transfer_time + avg_latency:.2f} ms")
+        print(f"  FPS:                     {1000/(image_load_time + preprocess_time + transfer_time + avg_latency):.1f} fps")
+        
+        print(f"\nOptimized pipeline (image already on GPU):")
+        print(f"  GPU preprocessing:       {gpu_preprocess_time:.2f} ms (includes grid creation)")
+        print(f"  Model inference:         {avg_latency:.2f} ms")
+        print(f"  Total (with overhead):   {gpu_preprocess_time + avg_latency:.2f} ms")
+        print(f"  FPS:                     {1000/(gpu_preprocess_time + avg_latency):.1f} fps")
+        
+        print(f"\nTrue AR/VR pipeline (with precomputed grid):")
+        print(f"  GPU preprocessing:       {gpu_preprocess_optimized:.3f} ms")
+        print(f"  Model inference:         {single_inference_time:.3f} ms")
+        print(f"  Total:                   {gpu_preprocess_optimized + single_inference_time:.3f} ms")
+        print(f"  FPS (if sustained):      {1000/(gpu_preprocess_optimized + single_inference_time):.1f} fps")
+        
+        print(f"\nReference (averaged over {num_runs} runs):")
+        print(f"  Model inference avg:     {avg_latency:.3f} ms")
+        print(f"  FPS (if sustained):      {1000/avg_latency:.1f} fps")
         print("="*50)
     
     # Compare with ground truth

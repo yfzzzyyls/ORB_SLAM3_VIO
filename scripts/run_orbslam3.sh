@@ -125,10 +125,10 @@ ABS_IMU_FILE="$ABS_DATA_DIR/mav0/imu0/data.csv"
 
 cd ../results
 
-# Always save tracking data by default
-export ORB_SLAM3_SAVE_TRACKING="tracking_data_${OUTPUT_NAME}"
-mkdir -p "$ORB_SLAM3_SAVE_TRACKING"
-echo "Tracking data will be saved to: results/$ORB_SLAM3_SAVE_TRACKING"
+# Disable tracking data save for now (was causing crashes)
+# export ORB_SLAM3_SAVE_TRACKING="tracking_data_${OUTPUT_NAME}"
+# mkdir -p "$ORB_SLAM3_SAVE_TRACKING"
+# echo "Tracking data will be saved to: results/$ORB_SLAM3_SAVE_TRACKING"
 echo ""
 
 # Run ORB-SLAM3 with Pangolin viewer
@@ -147,9 +147,9 @@ echo ""
 ../Examples/Monocular-Inertial/mono_inertial_tum_vi \
     ../Vocabulary/ORBvoc.txt \
     ../Examples/Monocular-Inertial/Aria2TUM-VI.yaml \
-    "$ABS_IMAGES_DIR" \
-    "$ABS_TIMESTAMPS_FILE" \
-    "$ABS_IMU_FILE" \
+    ../scripts/$DATA_DIR/mav0/cam0/data \
+    ../scripts/$DATA_DIR/mav0/timestamps.txt \
+    ../scripts/$DATA_DIR/mav0/imu0/data.csv \
     $OUTPUT_NAME
 
 echo ""

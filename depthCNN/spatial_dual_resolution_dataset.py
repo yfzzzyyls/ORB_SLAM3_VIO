@@ -8,14 +8,13 @@ import torchvision.transforms.functional as TF
 from torchvision.transforms import InterpolationMode
 from PIL import Image
 import random
-import cv2
 from spatial_dual_resolution_coordconv import GaussianDownsample
 
 
 class SpatialDualResolutionDataset(Dataset):
     def __init__(self, data_root, split='train', context_size=88, patch_size=88, 
                  output_size=22, augment=True, max_sequences=None, random_seed=42,
-                 k_extra=4, edge_bias_prob=0.3):
+                 k_extra=15, edge_bias_prob=0.3):
         """
         Dataset for spatial dual-resolution training with multi-point sampling.
         
@@ -28,8 +27,8 @@ class SpatialDualResolutionDataset(Dataset):
             augment: Whether to apply augmentations
             max_sequences: Maximum number of sequences to use (None = use all)
             random_seed: Random seed for reproducible sequence selection
-            k_extra: Number of extra points to sample per image (training only)
-            edge_bias_prob: Probability of edge-biased sampling (vs uniform)
+            k_extra: Number of extra points to sample per image (default 15 for 16x total)
+            edge_bias_prob: Probability of edge-biased sampling (vs uniform) - DEPRECATED, using stratified grid
         """
         self.data_root = data_root
         self.split = split
@@ -38,7 +37,7 @@ class SpatialDualResolutionDataset(Dataset):
         self.output_size = output_size
         self.augment = augment and (split == 'train')
         self.k_extra = k_extra if split == 'train' else 0  # Only add extra points during training
-        self.edge_bias_prob = edge_bias_prob
+        self.edge_bias_prob = 0.0  # Disabled - using stratified grid sampling instead
         
         # Original image size
         self.original_size = 1408
@@ -91,7 +90,7 @@ class SpatialDualResolutionDataset(Dataset):
         
         print(f"Found {len(self.samples)} samples for {split} split")
         if self.k_extra > 0:
-            print(f"Will sample {self.k_extra} extra points per image (edge bias: {edge_bias_prob*100:.0f}%)")
+            print(f"Will sample {self.k_extra} extra points per image using stratified 4x4 grid")
         
     def __len__(self):
         # During training, we effectively have more samples
@@ -116,65 +115,55 @@ class SpatialDualResolutionDataset(Dataset):
             gaze_data = json.load(f)
         return gaze_data
     
-    def _compute_edge_map(self, depth):
-        """Compute edge magnitude using Sobel filter."""
-        # Convert invalid depths to 0 for edge detection
-        depth_clean = depth.copy()
-        depth_clean[depth <= 0] = 0
-        
-        # Compute Sobel gradients
-        sobel_x = cv2.Sobel(depth_clean, cv2.CV_32F, 1, 0, ksize=3)
-        sobel_y = cv2.Sobel(depth_clean, cv2.CV_32F, 0, 1, ksize=3)
-        
-        # Compute magnitude
-        edge_magnitude = np.sqrt(sobel_x**2 + sobel_y**2)
-        
-        # Zero out edges at invalid regions
-        edge_magnitude[depth <= 0] = 0
-        
-        return edge_magnitude
-    
-    def _sample_valid_point(self, depth, edge_map=None, edge_biased=False):
-        """Sample a valid point from the depth map.
+    def _sample_stratified_grid_point(self, depth, region_idx):
+        """Sample a point from a specific region in the 4x4 stratified grid.
         
         Args:
             depth: Full resolution depth map [H, W]
-            edge_map: Edge magnitude map for edge-biased sampling
-            edge_biased: Whether to use edge-biased sampling
+            region_idx: Index of the region (0-15) in row-major order
         
         Returns:
             (x, y) coordinates in pixel space, or None if no valid point found
         """
-        # Create validity mask (with some margin from borders)
+        # 4x4 grid -> 16 regions of 352x352 pixels each
+        grid_size = 4
+        region_size = self.original_size // grid_size  # 1408 / 4 = 352
+        
+        # Calculate region row and column
+        region_row = region_idx // grid_size
+        region_col = region_idx % grid_size
+        
+        # Calculate region boundaries
+        y_start = region_row * region_size
+        y_end = y_start + region_size
+        x_start = region_col * region_size
+        x_end = x_start + region_size
+        
+        # Add margin to ensure we can extract a full patch
         margin = self.patch_size // 2 + 10
-        valid_mask = np.zeros_like(depth, dtype=bool)
-        valid_mask[margin:-margin, margin:-margin] = depth[margin:-margin, margin:-margin] > 0
+        y_start_safe = max(y_start, margin)
+        y_end_safe = min(y_end, self.original_size - margin)
+        x_start_safe = max(x_start, margin)
+        x_end_safe = min(x_end, self.original_size - margin)
+        
+        if y_start_safe >= y_end_safe or x_start_safe >= x_end_safe:
+            # Region is too small after margins
+            return None
+        
+        # Find valid pixels in this region
+        region_depth = depth[y_start_safe:y_end_safe, x_start_safe:x_end_safe]
+        valid_mask = region_depth > 0
         
         if not valid_mask.any():
-            return None
-            
-        if edge_biased and edge_map is not None:
-            # Edge-biased sampling: sample proportional to edge magnitude
-            # Apply validity mask
-            edge_weights = edge_map * valid_mask.astype(np.float32)
-            
-            # Add small epsilon to ensure some probability everywhere valid
-            edge_weights = edge_weights + 0.01 * valid_mask.astype(np.float32)
-            
-            # Normalize to probability distribution
-            edge_weights = edge_weights / edge_weights.sum()
-            
-            # Sample from distribution
-            flat_idx = np.random.choice(
-                edge_weights.size, 
-                p=edge_weights.ravel()
-            )
-            y, x = np.unravel_index(flat_idx, edge_weights.shape)
+            # No valid depth in this region, sample randomly anyway
+            y = np.random.randint(y_start_safe, y_end_safe)
+            x = np.random.randint(x_start_safe, x_end_safe)
         else:
-            # Uniform sampling from valid pixels
+            # Sample from valid pixels in this region
             valid_coords = np.where(valid_mask)
             idx = np.random.randint(len(valid_coords[0]))
-            y, x = valid_coords[0][idx], valid_coords[1][idx]
+            y = valid_coords[0][idx] + y_start_safe
+            x = valid_coords[1][idx] + x_start_safe
         
         # Add small random offset for sub-pixel coordinates
         x = x + np.random.uniform(-0.5, 0.5)
@@ -305,15 +294,19 @@ class SpatialDualResolutionDataset(Dataset):
             gaze_y = orig_gaze_y + gaze_shift_y
             is_real_gaze = True
         else:
-            # Sample an extra point
-            # Compute edge map for potential edge-biased sampling
-            edge_map = self._compute_edge_map(depth) if self.edge_bias_prob > 0 else None
+            # Sample from stratified grid (point_idx 1-15 maps to regions 0-14)
+            # We use point_idx-1 as region index, and randomly pick region 15 for the 16th point
+            # Or we can use a deterministic mapping for consistency
             
-            # Decide sampling strategy
-            use_edge_bias = random.random() < self.edge_bias_prob
+            # Option 1: Randomly select one of the 16 regions
+            region_idx = random.randint(0, 15)
             
-            # Sample a valid point
-            point = self._sample_valid_point(depth, edge_map, use_edge_bias)
+            # Option 2: Use point_idx to systematically cover all regions
+            # This ensures each batch covers all regions if batch_size >= 16
+            # region_idx = (point_idx - 1) % 16
+            
+            # Sample a point from the selected region
+            point = self._sample_stratified_grid_point(depth, region_idx)
             
             if point is None:
                 # Fallback to a random point near center if no valid point found
