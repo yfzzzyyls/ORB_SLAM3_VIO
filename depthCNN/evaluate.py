@@ -22,6 +22,7 @@ from typing import Dict, List
 sys.path.append(str(Path(__file__).parent))
 
 from vrs_dataset import ADTVRSDataset
+from processed_dataset import ProcessedADTDataset
 from model_rtmonodepth import RTMonoDepthS, DepthMetrics
 from torch.utils.data import DataLoader
 
@@ -200,6 +201,8 @@ def main():
                         help='Directory to cache extracted frames')
     parser.add_argument('--output-dir', type=str, default='./results',
                         help='Directory to save results')
+    parser.add_argument('--split', type=str, default='test', choices=['train', 'val', 'test'],
+                        help='Dataset split to evaluate (train/val/test)')
     parser.add_argument('--batch-size', type=int, default=4,
                         help='Batch size for evaluation')
     parser.add_argument('--num-workers', type=int, default=4,
@@ -237,17 +240,37 @@ def main():
     num_params = model.get_num_params()
     print(f"Model parameters: {num_params:,} ({num_params/1e6:.2f}M)")
     
-    # Create test dataset
-    print("Creating test dataset...")
-    test_dataset = ADTVRSDataset(
-        adt_root=args.data_root,
-        split='test',
-        transform=None,
-        cache_dir=Path(args.cache_dir) / 'test',
-        subsample_factor=args.subsample
-    )
-    
-    print(f"Test dataset: {len(test_dataset)} samples")
+    # Create evaluation dataset (supports processed train/val/test splits)
+    print("Creating evaluation dataset...")
+    split = args.split
+    data_root_path = Path(args.data_root)
+    processed_split_dir = data_root_path / split
+
+    if processed_split_dir.exists():
+        print(f"Detected processed ADT split at {processed_split_dir}")
+        test_dataset = ProcessedADTDataset(
+            data_root=args.data_root,
+            split=split,
+            transform=None
+        )
+
+        if args.subsample > 1:
+            original_len = len(test_dataset.frame_index)
+            test_dataset.frame_index = test_dataset.frame_index[::args.subsample]
+            print(f"Subsampled processed dataset from {original_len} to {len(test_dataset)} frames (factor {args.subsample})")
+    else:
+        print("Processed split not found; falling back to VRS dataset")
+        test_dataset = ADTVRSDataset(
+            adt_root=args.data_root,
+            split=split,
+            transform=None,
+            cache_dir=Path(args.cache_dir) / split,
+            subsample_factor=args.subsample
+        )
+
+    print(f"Dataset split '{split}' contains {len(test_dataset)} samples")
+    if len(test_dataset) == 0:
+        raise RuntimeError(f"No samples found for split '{split}' at {args.data_root}")
     
     # Create dataloader
     test_loader = DataLoader(

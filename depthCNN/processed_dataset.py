@@ -59,19 +59,50 @@ class ProcessedADTDataset(Dataset):
             
             with open(metadata_path, 'r') as f:
                 metadata = json.load(f)
-            
-            # Add all frames
-            for frame_info in metadata['frames']:
-                self.frame_index.append({
-                    'sequence': seq_dir.name,
-                    'seq_dir': seq_dir,
-                    'rgb_file': frame_info['rgb'],
-                    'depth_file': frame_info['depth'],
-                    'timestamp_ns': frame_info['rgb_timestamp_ns'],
-                    'index': frame_info['index']
-                })
-            
-            print(f"  {seq_dir.name}: {metadata['num_frames']} frames")
+
+            if 'frames' in metadata:
+                # Modern metadata contains explicit frame list
+                for frame_info in metadata['frames']:
+                    self.frame_index.append({
+                        'sequence': seq_dir.name,
+                        'seq_dir': seq_dir,
+                        'rgb_file': frame_info['rgb'],
+                        'depth_file': frame_info['depth'],
+                        'timestamp_ns': frame_info['rgb_timestamp_ns'],
+                        'index': frame_info['index']
+                    })
+
+                num_frames = metadata.get('num_frames', len(metadata['frames']))
+            else:
+                # Legacy metadata: infer frames by scanning directories
+                rgb_dir = seq_dir / 'rgb'
+                depth_dir = seq_dir / 'depth'
+
+                rgb_files = sorted([f for f in os.listdir(rgb_dir) if f.lower().endswith('.png')])
+                depth_files = sorted([f for f in os.listdir(depth_dir) if f.lower().endswith('.npz')])
+
+                if len(rgb_files) != len(depth_files):
+                    print(f"Warning: RGB/depth count mismatch in {seq_dir.name} ({len(rgb_files)} vs {len(depth_files)})")
+
+                for idx, rgb_file in enumerate(rgb_files):
+                    stem = os.path.splitext(rgb_file)[0]
+                    depth_file = f"{stem}.npz"
+                    if depth_file not in depth_files:
+                        print(f"  Skipping {rgb_file}: matching depth file not found")
+                        continue
+
+                    self.frame_index.append({
+                        'sequence': seq_dir.name,
+                        'seq_dir': seq_dir,
+                        'rgb_file': rgb_file,
+                        'depth_file': depth_file,
+                        'timestamp_ns': 0,
+                        'index': idx
+                    })
+
+                num_frames = len(rgb_files)
+
+            print(f"  {seq_dir.name}: {num_frames} frames")
         
         print(f"Total {self.split} frames: {len(self.frame_index)}")
     
