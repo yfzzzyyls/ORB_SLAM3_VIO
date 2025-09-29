@@ -270,6 +270,11 @@ class FiLMLayer(nn.Module):
 class SpatialDualResolutionGazeDepth(nn.Module):
     def __init__(self):
         super().__init__()
+
+        # Canonical resolutions for the dual-branch architecture
+        self.full_res_size = 1408
+        self.context_size = 88
+        self.patch_size = 88
         
         # Context encoder - processes downsampled full image with coordinate channels
         # Input: 7 channels (RGB + gaze_heatmap + x_coord + y_coord + r_to_gaze)
@@ -376,6 +381,15 @@ class SpatialDualResolutionGazeDepth(nn.Module):
         
         # NEW: Gaussian downsampler for targets (Fix #5)
         self.gaussian_downsample = GaussianDownsample(scale_factor=4)
+
+        # Precompute offsets for gaze-centred patch extraction (used in GPU preprocessing)
+        patch_offsets = torch.linspace(
+            -(self.patch_size / 2) + 0.5,
+            (self.patch_size / 2) - 0.5,
+            self.patch_size,
+            dtype=torch.float32
+        )
+        self.register_buffer('patch_offsets', patch_offsets, persistent=False)
         
         # Initialize weights
         self._init_weights()
@@ -457,6 +471,61 @@ class SpatialDualResolutionGazeDepth(nn.Module):
         heatmap = torch.exp(-dist_sq / (2 * sigma**2))
         
         return heatmap.unsqueeze(1)  # Add channel dimension
+
+    def _gaze_norm_to_pixels(self, gaze_x, gaze_y, width, height):
+        """Convert normalized gaze coordinates [-1,1] to pixel indices (align_corners=False)."""
+        gx = ((gaze_x + 1.0) * 0.5) * width - 0.5
+        gy = ((gaze_y + 1.0) * 0.5) * height - 0.5
+        return gx, gy
+
+    def extract_patch_from_full(self, full_rgb, gaze_x, gaze_y, patch_size=None):
+        """Extract the gaze-centred RGB patch from a full-resolution tensor using GPU ops."""
+        patch_size = patch_size or self.patch_size
+        B, _, H, W = full_rgb.shape
+        device = full_rgb.device
+
+        gx_pix, gy_pix = self._gaze_norm_to_pixels(gaze_x.view(B, 1, 1), gaze_y.view(B, 1, 1), W, H)
+
+        offsets = self.patch_offsets.to(device)
+        grid_y, grid_x = torch.meshgrid(offsets, offsets, indexing='ij')  # [patch, patch]
+        grid_x = grid_x.unsqueeze(0) + gx_pix
+        grid_y = grid_y.unsqueeze(0) + gy_pix
+
+        grid_x = 2.0 * (grid_x + 0.5) / W - 1.0
+        grid_y = 2.0 * (grid_y + 0.5) / H - 1.0
+        grid = torch.stack([grid_x, grid_y], dim=-1)  # [B, patch, patch, 2]
+
+        patch = F.grid_sample(
+            full_rgb,
+            grid,
+            mode='bilinear',
+            align_corners=False,
+            padding_mode='reflection'
+        )
+        return patch
+
+    def prepare_inputs(self, full_rgb, gaze_x, gaze_y, patch_size=None):
+        """Prepare 88×88 context and patch tensors directly on the target device."""
+        if full_rgb.dim() != 4:
+            raise ValueError("Expected full_rgb with shape [B, C, H, W]")
+
+        patch_size = patch_size or self.patch_size
+
+        context_rgb = F.interpolate(
+            full_rgb,
+            size=(self.context_size, self.context_size),
+            mode='bilinear',
+            align_corners=False
+        )
+        patch_rgb = self.extract_patch_from_full(full_rgb, gaze_x, gaze_y, patch_size)
+        if patch_rgb.shape[-1] != self.patch_size:
+            patch_rgb = F.interpolate(
+                patch_rgb,
+                size=(self.patch_size, self.patch_size),
+                mode='bilinear',
+                align_corners=False
+            )
+        return context_rgb, patch_rgb
         
     def roi_align_to_patch(self, ctx_44, gaze_x, gaze_y, img_size=1408, patch_size=88):
         """
@@ -503,7 +572,19 @@ class SpatialDualResolutionGazeDepth(nn.Module):
         # 5) Sample with reflection padding to match dataset patch behavior
         return F.grid_sample(ctx_44, grid, mode='bilinear', align_corners=False, padding_mode='reflection')
         
-    def forward(self, context_rgb, patch_rgb, gaze_x, gaze_y):
+    def forward(self, context_rgb=None, patch_rgb=None, gaze_x=None, gaze_y=None, full_rgb=None):
+        if gaze_x is None or gaze_y is None:
+            raise ValueError("gaze_x and gaze_y must be provided")
+
+        if context_rgb is None or patch_rgb is None:
+            if full_rgb is None:
+                raise ValueError("Provide context/patch tensors or a full-resolution frame")
+            context_rgb, patch_rgb = self.prepare_inputs(full_rgb, gaze_x, gaze_y)
+
+        # Flatten gaze tensors in case they come with extra dims
+        gaze_x = gaze_x.view(-1)
+        gaze_y = gaze_y.view(-1)
+
         B = context_rgb.shape[0]
         device = context_rgb.device
         

@@ -298,12 +298,14 @@ def train_epoch(model, train_loader, optimizer, scheduler, loss_fns, epoch,
             continue
             
         # Move to GPU
-        context_rgb = batch['context_rgb'].cuda(non_blocking=True)
-        patch_rgb = batch['patch_rgb'].cuda(non_blocking=True)
+        rgb_full = batch['rgb_full'].cuda(non_blocking=True)
         depth_gt = batch['depth'].cuda(non_blocking=True)
         valid_mask = batch['valid_mask'].cuda(non_blocking=True)
         gaze_x = batch['gaze_x'].cuda(non_blocking=True)
         gaze_y = batch['gaze_y'].cuda(non_blocking=True)
+
+        prepare_fn = model.module.prepare_inputs if isinstance(model, DDP) else model.prepare_inputs
+        context_rgb, patch_rgb = prepare_fn(rgb_full, gaze_x, gaze_y)
         
         # Forward pass - now returns 3 outputs (Fix #1)
         pred_depth, log_sigma, pred_gaze_depth = model(context_rgb, patch_rgb, gaze_x, gaze_y)
@@ -464,12 +466,14 @@ def validate(model, val_loader, loss_fns, epoch, writer, distributed, rank, worl
                 continue
                 
             # Move to GPU
-            context_rgb = batch['context_rgb'].cuda(non_blocking=True)
-            patch_rgb = batch['patch_rgb'].cuda(non_blocking=True)
+            rgb_full = batch['rgb_full'].cuda(non_blocking=True)
             depth_gt = batch['depth'].cuda(non_blocking=True)
             valid_mask = batch['valid_mask'].cuda(non_blocking=True)
             gaze_x = batch['gaze_x'].cuda(non_blocking=True)
             gaze_y = batch['gaze_y'].cuda(non_blocking=True)
+
+            prepare_fn = model.module.prepare_inputs if isinstance(model, DDP) else model.prepare_inputs
+            context_rgb, patch_rgb = prepare_fn(rgb_full, gaze_x, gaze_y)
             
             # Forward pass with optional TTA
             if use_tta:
@@ -477,10 +481,10 @@ def validate(model, val_loader, loss_fns, epoch, writer, distributed, rank, worl
                 pred_depth, log_sigma, pred_gaze_depth = model(context_rgb, patch_rgb, gaze_x, gaze_y)
                 
                 # Flipped prediction
-                context_rgb_flip = torch.flip(context_rgb, dims=[-1])
-                patch_rgb_flip = torch.flip(patch_rgb, dims=[-1])
+                rgb_full_flip = torch.flip(rgb_full, dims=[-1])
                 gaze_x_flip = -gaze_x  # Flip gaze x coordinate
-                
+                context_rgb_flip, patch_rgb_flip = prepare_fn(rgb_full_flip, gaze_x_flip, gaze_y)
+
                 pred_depth_flip, log_sigma_flip, pred_gaze_depth_flip = model(
                     context_rgb_flip, patch_rgb_flip, gaze_x_flip, gaze_y
                 )

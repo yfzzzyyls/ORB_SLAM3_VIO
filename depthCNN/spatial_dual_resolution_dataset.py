@@ -328,15 +328,8 @@ class SpatialDualResolutionDataset(Dataset):
         gaze_x = np.clip(gaze_x, 0, self.original_size - 1)
         gaze_y = np.clip(gaze_y, 0, self.original_size - 1)
         
-        # Convert RGB to tensor
+        # Convert RGB to tensor (normalized to [0,1])
         rgb_tensor = TF.to_tensor(rgb)
-        
-        # Create context: downsample full image
-        context_rgb = TF.resize(rgb_tensor, [self.context_size, self.context_size], 
-                               interpolation=InterpolationMode.BILINEAR)
-        
-        # Create patch: extract high-res crop at gaze using FLOAT coordinates (Fix #2)
-        patch_rgb = self._extract_patch_float(rgb_tensor, gaze_x, gaze_y, self.patch_size)
         
         # Extract GT depth patch (88x88) using FLOAT coordinates (Fix #2)
         depth_patch_88 = self._extract_patch_float(depth, gaze_x, gaze_y, self.patch_size)
@@ -402,8 +395,7 @@ class SpatialDualResolutionDataset(Dataset):
         gaze_y_norm = 2.0 * (gaze_y + 0.5) / self.original_size - 1.0
         
         return {
-            'context_rgb': context_rgb,
-            'patch_rgb': patch_rgb,
+            'rgb_full': rgb_tensor,
             'depth': depth_output.squeeze(0),  # Remove channel dim
             'valid_mask': valid_mask.squeeze(0),
             'gaze_x': torch.tensor(gaze_x_norm, dtype=torch.float32),
@@ -424,8 +416,7 @@ def custom_collate_fn(batch):
         return None
         
     # Stack tensors
-    context_rgb = torch.stack([s['context_rgb'] for s in batch])
-    patch_rgb = torch.stack([s['patch_rgb'] for s in batch])
+    rgb_full = torch.stack([s['rgb_full'] for s in batch])
     depth = torch.stack([s['depth'] for s in batch])
     valid_mask = torch.stack([s['valid_mask'] for s in batch])
     gaze_x = torch.stack([s['gaze_x'] for s in batch])
@@ -438,8 +429,7 @@ def custom_collate_fn(batch):
     frame_ids = [s['frame_id'] for s in batch]
     
     return {
-        'context_rgb': context_rgb,
-        'patch_rgb': patch_rgb,
+        'rgb_full': rgb_full,
         'depth': depth,
         'valid_mask': valid_mask,
         'gaze_x': gaze_x,
@@ -469,8 +459,7 @@ if __name__ == '__main__':
         print(f"\nSample {i}:")
         print(f"  Sequence: {sample['seq']}")
         print(f"  Frame ID: {sample['frame_id']}")
-        print(f"  Context RGB shape: {sample['context_rgb'].shape}")
-        print(f"  Patch RGB shape: {sample['patch_rgb'].shape}")
+        print(f"  RGB full shape: {sample['rgb_full'].shape}")
         print(f"  Depth shape: {sample['depth'].shape}")
         print(f"  Valid mask shape: {sample['valid_mask'].shape}")
         print(f"  Gaze: ({sample['gaze_x']:.3f}, {sample['gaze_y']:.3f})")
@@ -484,7 +473,6 @@ if __name__ == '__main__':
     
     batch = next(iter(loader))
     print(f"\nBatch test:")
-    print(f"  Context RGB shape: {batch['context_rgb'].shape}")
-    print(f"  Patch RGB shape: {batch['patch_rgb'].shape}")
+    print(f"  RGB full shape: {batch['rgb_full'].shape}")
     print(f"  Depth shape: {batch['depth'].shape}")
     print(f"  Gaze shape: ({batch['gaze_x'].shape}, {batch['gaze_y'].shape})")

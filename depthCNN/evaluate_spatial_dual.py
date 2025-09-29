@@ -10,7 +10,6 @@ import torch.nn.functional as F
 import numpy as np
 from PIL import Image
 import torchvision.transforms.functional as TF
-from torchvision.transforms import InterpolationMode
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 
@@ -86,81 +85,11 @@ def load_model(checkpoint_path, device='cuda', use_ema=False):
     
     return model
 
-
-def extract_patch_float(image_tensor, gaze_x, gaze_y, patch_size, original_size=1408):
-    """Extract patch around gaze using float coordinates (matches training)."""
-    
-    # Check if torch tensor
-    if isinstance(image_tensor, torch.Tensor):
-        B = 1 if image_tensor.dim() == 3 else image_tensor.shape[0]
-        if image_tensor.dim() == 3:
-            image = image_tensor.unsqueeze(0)  # Add batch dim
-        else:
-            image = image_tensor
-        device = image.device
-        
-        # Convert gaze to float tensors
-        gaze_x_float = torch.tensor(gaze_x, dtype=torch.float32, device=device)
-        gaze_y_float = torch.tensor(gaze_y, dtype=torch.float32, device=device)
-        
-        # Build sampling grid
-        half = patch_size / 2.0
-        
-        # Grid in pixel coordinates
-        y_coords = torch.linspace(-half + 0.5, half - 0.5, patch_size, device=device)
-        x_coords = torch.linspace(-half + 0.5, half - 0.5, patch_size, device=device)
-        grid_y, grid_x = torch.meshgrid(y_coords, x_coords, indexing='ij')
-        
-        # Add gaze offset and normalize to [-1, 1] with align_corners=False convention
-        grid_x = 2.0 * (grid_x + gaze_x_float + 0.5) / original_size - 1.0
-        grid_y = 2.0 * (grid_y + gaze_y_float + 0.5) / original_size - 1.0
-        
-        # Stack for grid_sample [1, H, W, 2]
-        grid = torch.stack([grid_x, grid_y], dim=-1).unsqueeze(0)
-        
-        # Sample with reflection padding, align_corners=False for consistency
-        patch = F.grid_sample(image, grid, mode='bilinear', 
-                            padding_mode='reflection', align_corners=False)
-        
-        return patch.squeeze(0) if B == 1 else patch
-    else:
-        raise ValueError("Only tensor inputs supported")
-
-
-def preprocess_image(image_path, gaze_x, gaze_y, patch_coverage=88):
-    """Load and preprocess image exactly as in training.
-    
-    Args:
-        patch_coverage: Size of region to extract from original image before downsampling to 88x88.
-                       Default 88 means direct 88x88 extraction (original behavior).
-                       Larger values like 352 mean extract 352x352 then downsample to 88x88.
-    """
-    
-    # Load RGB image
+def load_image(image_path):
+    """Load RGB image and convert to tensor."""
     image = Image.open(image_path).convert('RGB')
-    original_size = image.size  # (width, height)
-    print(f"Original image size: {original_size[0]}×{original_size[1]}")
-    print(f"Patch coverage: {patch_coverage}×{patch_coverage} pixels ({patch_coverage/1408*100:.1f}% of image)")
-    
-    # Convert to tensor and normalize to [0, 1]
-    rgb_tensor = TF.to_tensor(image)  # This normalizes to [0, 1]
-    
-    # Create context: downsample full image to 88x88
-    context_rgb = TF.resize(rgb_tensor, [88, 88], 
-                           interpolation=InterpolationMode.BILINEAR)
-    
-    # Create patch: extract larger region then downsample
-    if patch_coverage != 88:
-        # Extract larger patch
-        patch_large = extract_patch_float(rgb_tensor, gaze_x, gaze_y, patch_coverage, 1408)
-        # Downsample to 88x88
-        patch_rgb = TF.resize(patch_large, [88, 88], 
-                            interpolation=InterpolationMode.BILINEAR)
-    else:
-        # Original behavior: extract 88x88 directly
-        patch_rgb = extract_patch_float(rgb_tensor, gaze_x, gaze_y, 88, 1408)
-    
-    return context_rgb, patch_rgb, image
+    rgb_tensor = TF.to_tensor(image)
+    return rgb_tensor, image
 
 
 def load_depth(depth_path, gaze_x, gaze_y):
@@ -197,11 +126,15 @@ def main():
     # Load model
     model = load_model(args.checkpoint, device, args.use_ema)
     
-    # Preprocess image
+    # Load full-resolution image
     print(f"\nProcessing image: {args.image}")
     print(f"Gaze location (pixels): ({args.gaze_x}, {args.gaze_y})")
-    
-    context_rgb, patch_rgb, original_image = preprocess_image(args.image, args.gaze_x, args.gaze_y, args.patch_coverage)
+
+    rgb_tensor, original_image = load_image(args.image)
+    original_size = original_image.size  # (width, height)
+    print(f"Original image size: {original_size[0]}×{original_size[1]}")
+    coverage_pct = args.patch_coverage / 1408 * 100
+    print(f"Patch coverage: {args.patch_coverage}×{args.patch_coverage} pixels ({coverage_pct:.1f}% of image)")
     
     # Load ground truth depth if available
     gt_depth = None
@@ -228,31 +161,70 @@ def main():
     import time
     
     with torch.no_grad():
-        # Prepare inputs
-        context_batch = context_rgb.unsqueeze(0).to(device)
-        patch_batch = patch_rgb.unsqueeze(0).to(device)
         gaze_x_tensor = torch.tensor([gaze_x_norm], dtype=torch.float32, device=device)
         gaze_y_tensor = torch.tensor([gaze_y_norm], dtype=torch.float32, device=device)
+
+        full_rgb_batch = rgb_tensor.unsqueeze(0).to(device)
+        context_batch, patch_batch = model.prepare_inputs(
+            full_rgb_batch,
+            gaze_x_tensor,
+            gaze_y_tensor,
+            patch_size=args.patch_coverage
+        )
+
+        # Store CPU copies for visualization before any in-place ops
+        context_rgb = context_batch[0].detach().cpu()
+        patch_rgb = patch_batch[0].detach().cpu()
         
         # Warm up (first run is slower due to CUDA kernel compilation)
         _ = model(context_batch, patch_batch, gaze_x_tensor, gaze_y_tensor)
         if device.type == 'cuda':
             torch.cuda.synchronize()
-        
-        # Measure latency over multiple runs
+
+        # Measure pure inference latency on 88×88 branches
         num_runs = 10 if device.type == 'cpu' else 100
         if device.type == 'cuda':
             torch.cuda.synchronize()
         start_time = time.perf_counter()
-        
+
         for _ in range(num_runs):
             outputs = model(context_batch, patch_batch, gaze_x_tensor, gaze_y_tensor)
             if device.type == 'cuda':
                 torch.cuda.synchronize()
-        
+
         end_time = time.perf_counter()
         avg_latency = (end_time - start_time) / num_runs * 1000  # Convert to ms
-        
+
+        # Measure end-to-end latency (GPU preprocessing + inference, assuming frame already resides on device)
+        pipeline_runs = 5 if device.type == 'cpu' else 25
+        preprocess_times = []
+        end_to_end_times = []
+
+        for _ in range(pipeline_runs):
+            if device.type == 'cuda':
+                torch.cuda.synchronize()
+            pipeline_start = time.perf_counter()
+
+            context_e2e, patch_e2e = model.prepare_inputs(
+                full_rgb_batch,
+                gaze_x_tensor,
+                gaze_y_tensor,
+                patch_size=args.patch_coverage
+            )
+
+            if device.type == 'cuda':
+                torch.cuda.synchronize()
+            inference_start = time.perf_counter()
+
+            _ = model(context_e2e, patch_e2e, gaze_x_tensor, gaze_y_tensor)
+
+            if device.type == 'cuda':
+                torch.cuda.synchronize()
+            pipeline_end = time.perf_counter()
+
+            preprocess_times.append((inference_start - pipeline_start) * 1000)
+            end_to_end_times.append((pipeline_end - pipeline_start) * 1000)
+
         # Get final outputs for visualization
         outputs = model(context_batch, patch_batch, gaze_x_tensor, gaze_y_tensor)
         
@@ -276,6 +248,12 @@ def main():
         print(f"Device: {device}")
         print(f"Average inference time: {avg_latency:.2f} ms")
         print(f"FPS capability: {1000/avg_latency:.1f} fps")
+        if end_to_end_times:
+            mean_preproc = sum(preprocess_times) / len(preprocess_times)
+            mean_end_to_end = sum(end_to_end_times) / len(end_to_end_times)
+            print(f"Average GPU preprocessing time: {mean_preproc:.2f} ms")
+            print(f"Average end-to-end time (on-GPU): {mean_end_to_end:.2f} ms")
+            print(f"End-to-end FPS capability: {1000/mean_end_to_end:.1f} fps")
         print("="*50)
     
     # Compare with ground truth
