@@ -151,76 +151,7 @@ Execute the following script to process sequences and compute the RMS ATE:
 ./tum_vi_eval_examples
 ```
 
-# 7. ADT (Aria Digital Twin) Examples
-
-This fork includes support for the ADT dataset with custom scripts for data conversion and evaluation.
-
-## Data Preparation
-
-1. Convert ADT data to TUM-VI format:
-```bash
-cd scripts
-python processed_adt_to_tumvi.py <sequence_name>
-# Example: python processed_adt_to_tumvi.py Apartment_release_clean_seq133_M1292
-```
-
-## Running ORB-SLAM3 with Evaluation
-
-We provide an integrated script that runs ORB-SLAM3 and evaluates the results using EVO tools:
-
-```bash
-# Run VIO mode (without loop closure) and evaluate
-./scripts/evaluate_slam_with_evo.sh seq133 --mode vio --plot --save-results
-
-# Run full SLAM mode (with loop closure) and evaluate
-./scripts/evaluate_slam_with_evo.sh seq133 --mode slam --plot --save-results
-
-# Evaluate existing results without re-running SLAM
-./scripts/evaluate_slam_with_evo.sh seq133 --skip-slam --plot
-
-# Run all sequences
-./scripts/evaluate_slam_with_evo.sh --all --mode vio --save-results
-```
-
-### Supported Options:
-- `--mode <vio|slam>`: Choose between VIO-only or full SLAM mode (default: vio)
-- `--skip-slam`: Skip SLAM execution, only evaluate existing results
-- `--plot`: Generate visualization plots
-- `--save-results`: Save evaluation results to files
-- `--align`: Enable trajectory alignment (default: enabled)
-
-### Short Names:
-You can use shortened sequence names:
-- `seq133` or `133` instead of `Apartment_release_clean_seq133_M1292`
-- `seq135` or `135` instead of `Apartment_release_clean_seq135_M1292`
-
-## Evaluation Metrics
-
-The script automatically computes:
-- **ATE (Absolute Trajectory Error)**: Overall trajectory accuracy
-- **RPE (Relative Pose Error)**:
-  - Frame-to-frame: Drift per frame (~3cm typical)
-  - 1-second intervals: Drift over 1 second
-  - 5-second intervals: Drift over 5 seconds
-  - Per meter: Drift per meter traveled
-
-Results are saved in `results/evo_evaluation/` with detailed metrics and plots.
-
-## Manual Execution
-
-To run ORB-SLAM3 manually on ADT data:
-```bash
-cd results
-../Examples/Monocular-Inertial/mono_inertial_tum_vi \
-    ../Vocabulary/ORBvoc.txt \
-    ../Examples/Monocular-Inertial/Aria2TUM-VI.yaml \
-    ../scripts/output_tumvi/<sequence>/mav0/cam0/data \
-    ../scripts/output_tumvi/<sequence>/mav0/timestamps.txt \
-    ../scripts/output_tumvi/<sequence>/mav0/imu0/data.csv \
-    <output_name>
-```
-
-# 8. ROS Examples
+# 7. ROS Examples
 
 ### Building the nodes for mono, mono-inertial, stereo, stereo-inertial and RGB-D
 Tested with ROS Melodic and ubuntu 18.04.

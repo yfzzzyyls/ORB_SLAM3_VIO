@@ -45,7 +45,7 @@ def load_gaze_data(eyegaze_csv_path: Path) -> pd.DataFrame:
 
 def pitch_yaw_to_pixel_coords(pitch_rad: float, yaw_rad: float, 
                               width: int = 1408, height: int = 1408,
-                              fov_degrees: float = 98.1) -> Tuple[int, int]:
+                              fov_degrees: float = 110.0) -> Tuple[int, int]:
     """
     Convert pitch/yaw angles to pixel coordinates for RGB camera.
     
@@ -54,7 +54,7 @@ def pitch_yaw_to_pixel_coords(pitch_rad: float, yaw_rad: float,
         yaw_rad: Yaw angle in radians (positive right)
         width: Image width in pixels (1408 for ADT RGB)
         height: Image height in pixels (1408 for ADT RGB)
-        fov_degrees: Field of view in degrees (98.1 for ADT RGB camera)
+        fov_degrees: Field of view in degrees (110 for ADT RGB camera)
     
     Returns:
         (x, y) pixel coordinates, or (-1, -1) if outside image bounds
@@ -380,10 +380,6 @@ def main():
                         help='Subsample factor (1=all frames, 10=every 10th frame)')
     parser.add_argument('--num-workers', type=int, default=4,
                         help='Number of parallel workers')
-    parser.add_argument('--use-split-info', action='store_true',
-                        help='Use split_info.json for sequence selection')
-    parser.add_argument('--max-sequences', type=int, default=None,
-                        help='Maximum sequences to process (for testing)')
     
     args = parser.parse_args()
     
@@ -399,66 +395,31 @@ def main():
     for dir_path in [train_dir, val_dir, test_dir]:
         dir_path.mkdir(parents=True, exist_ok=True)
     
-    # Find sequences based on mode
+    # Find all sequences in train and test subdirectories
     train_sequences = []
     val_sequences = []
     test_sequences = []
     
-    if args.use_split_info:
-        # Load sequences from split_info.json
-        split_info_path = data_root / 'split_info.json'
-        if not split_info_path.exists():
-            print(f"Error: {split_info_path} not found!")
-            print("Please run download_100_sequences.py first.")
-            return
-        
-        with open(split_info_path, 'r') as f:
-            split_data = json.load(f)
-        
-        train_sequences = split_data.get('train', [])
-        val_sequences = split_data.get('val', [])
-        test_sequences = split_data.get('test', [])
-        
-        print(f"Loaded from split_info.json: {split_data.get('total', 0)} sequences")
-    else:
-        # Original behavior - look for clean sequences
-        # Check train directory
-        train_path = data_root / 'train'
-        if train_path.exists():
-            train_seqs = sorted([
-                d for d in os.listdir(train_path)
-                if d.startswith("Apartment_release_clean_seq") and 
-                os.path.isdir(os.path.join(train_path, d))
-            ])
-            # Use first 7 for train, next 1 for val
-            train_sequences = train_seqs[:7]
-            val_sequences = train_seqs[7:8] if len(train_seqs) > 7 else []
-        
-        # Check test directory
-        test_path = data_root / 'test'
-        if test_path.exists():
-            test_sequences = sorted([
-                d for d in os.listdir(test_path)
-                if d.startswith("Apartment_release_clean_seq") and 
-                os.path.isdir(os.path.join(test_path, d))
-            ])[:2]  # Use first 2 test sequences
+    # Check train directory
+    train_path = data_root / 'train'
+    if train_path.exists():
+        train_seqs = sorted([
+            d for d in os.listdir(train_path)
+            if d.startswith("Apartment_release_clean_seq") and 
+            os.path.isdir(os.path.join(train_path, d))
+        ])
+        # Use first 7 for train, next 1 for val
+        train_sequences = train_seqs[:7]
+        val_sequences = train_seqs[7:8] if len(train_seqs) > 7 else []
     
-    # Apply max sequences limit if specified
-    if args.max_sequences:
-        total_seqs = len(train_sequences) + len(val_sequences) + len(test_sequences)
-        if total_seqs > args.max_sequences:
-            # Proportionally reduce each split
-            train_ratio = len(train_sequences) / total_seqs
-            val_ratio = len(val_sequences) / total_seqs
-            test_ratio = len(test_sequences) / total_seqs
-            
-            train_max = int(args.max_sequences * train_ratio)
-            val_max = int(args.max_sequences * val_ratio)
-            test_max = args.max_sequences - train_max - val_max
-            
-            train_sequences = train_sequences[:train_max]
-            val_sequences = val_sequences[:val_max]
-            test_sequences = test_sequences[:test_max]
+    # Check test directory
+    test_path = data_root / 'test'
+    if test_path.exists():
+        test_sequences = sorted([
+            d for d in os.listdir(test_path)
+            if d.startswith("Apartment_release_clean_seq") and 
+            os.path.isdir(os.path.join(test_path, d))
+        ])[:2]  # Use first 2 test sequences
     
     all_sequences = train_sequences + val_sequences + test_sequences
     
@@ -477,37 +438,19 @@ def main():
     ]:
         print(f"\n{split_name.upper()} sequences:")
         for seq in sequences:
-            # Find sequence directory - try multiple locations
-            seq_dir = None
+            print(f"  - {seq}")
+            # Determine the correct source directory
+            if split_name in ['train', 'val']:
+                seq_dir = data_root / 'train' / seq
+            else:  # test
+                seq_dir = data_root / 'test' / seq
             
-            # Try split-specific directory first
-            if args.use_split_info:
-                # For new structure, sequences might be in their respective split dirs
-                candidate = data_root / split_name / seq
-                if candidate.exists():
-                    seq_dir = candidate
-                else:
-                    # Try without split subdirectory
-                    candidate = data_root / seq
-                    if candidate.exists():
-                        seq_dir = candidate
-            else:
-                # Original structure
-                if split_name in ['train', 'val']:
-                    seq_dir = data_root / 'train' / seq
-                else:  # test
-                    seq_dir = data_root / 'test' / seq
-            
-            if seq_dir and seq_dir.exists():
-                print(f"  ✓ {seq}")
-                tasks.append({
-                    'seq_name': seq,
-                    'seq_dir': seq_dir,
-                    'output_dir': output_dir,
-                    'subsample': args.subsample
-                })
-            else:
-                print(f"  ✗ {seq} - Not found")
+            tasks.append({
+                'seq_name': seq,
+                'seq_dir': seq_dir,
+                'output_dir': output_dir,
+                'subsample': args.subsample
+            })
     
     # Extract sequences in parallel
     print(f"\nExtracting sequences with {args.num_workers} workers...")

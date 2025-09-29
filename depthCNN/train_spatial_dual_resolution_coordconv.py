@@ -7,9 +7,6 @@ import numpy as np
 from datetime import datetime
 from tqdm import tqdm
 from copy import deepcopy
-import cv2
-import io
-from pathlib import Path
 
 import torch
 import torch.nn as nn
@@ -20,232 +17,8 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 
-# Set OpenCV threads to prevent CPU oversubscription
-cv2.setNumThreads(0)
-
 from spatial_dual_resolution_coordconv import SpatialDualResolutionGazeDepth
 from spatial_dual_resolution_dataset import SpatialDualResolutionDataset, custom_collate_fn
-
-# WebDataset imports (optional, fallback to regular dataset if not available)
-try:
-    import webdataset as wds
-    from PIL import Image
-    HAS_WEBDATASET = True
-except ImportError:
-    HAS_WEBDATASET = False
-    print("WebDataset not available, using regular dataset loading")
-
-
-def create_webdataset_shards(data_root, output_dir, split='train', shard_size_mb=1024, max_sequences=None):
-    """Create WebDataset tar shards from ADT dataset with pre-computed edge maps."""
-    if not HAS_WEBDATASET:
-        raise ImportError("WebDataset not installed. Run: pip install webdataset")
-    
-    import json
-    from tqdm import tqdm
-    
-    os.makedirs(output_dir, exist_ok=True)
-    split_dir = os.path.join(data_root, split)
-    
-    # Get all sequences
-    all_sequences = sorted([d for d in os.listdir(split_dir) 
-                          if os.path.isdir(os.path.join(split_dir, d))])
-    
-    if max_sequences and len(all_sequences) > max_sequences:
-        sequences = all_sequences[:max_sequences]
-    else:
-        sequences = all_sequences
-    
-    print(f"Creating shards for {len(sequences)} sequences in {split} split")
-    
-    # Calculate samples per shard
-    shard_size_bytes = shard_size_mb * 1024 * 1024
-    estimated_sample_size = 3 * 1024 * 1024  # ~3MB per sample (RGB + depth + edge)
-    samples_per_shard = max(1, shard_size_bytes // estimated_sample_size)
-    
-    shard_pattern = os.path.join(output_dir, f"{split}_%06d.tar")
-    sink = wds.ShardWriter(shard_pattern, maxsize=shard_size_bytes)
-    
-    sample_count = 0
-    for seq in tqdm(sequences, desc=f"Processing {split} sequences"):
-        seq_dir = os.path.join(split_dir, seq)
-        metadata_file = os.path.join(seq_dir, 'metadata.json')
-        
-        if not os.path.exists(metadata_file):
-            continue
-            
-        with open(metadata_file, 'r') as f:
-            metadata = json.load(f)
-        
-        for frame_info in metadata['frames']:
-            if frame_info.get('depth') and frame_info.get('has_gaze', False):
-                try:
-                    # Load RGB
-                    rgb_path = os.path.join(seq_dir, 'rgb', frame_info['rgb'])
-                    with open(rgb_path, 'rb') as f:
-                        rgb_data = f.read()
-                    
-                    # Load depth
-                    depth_path = os.path.join(seq_dir, 'depth', frame_info['depth'])
-                    depth_data = np.load(depth_path)
-                    depth = (depth_data['depth'] / 1000.0).astype(np.float16)  # mm to meters, save as float16
-                    
-                    # Pre-compute edge map (CRITICAL for performance)
-                    depth_clean = depth.copy()
-                    depth_clean[depth <= 0] = 0
-                    sobel_x = cv2.Sobel(depth_clean, cv2.CV_32F, 1, 0, ksize=3)
-                    sobel_y = cv2.Sobel(depth_clean, cv2.CV_32F, 0, 1, ksize=3)
-                    edge_magnitude = np.sqrt(sobel_x**2 + sobel_y**2)
-                    edge_magnitude[depth <= 0] = 0
-                    
-                    # Save as .npy with proper shape encoding
-                    depth_buffer = io.BytesIO()
-                    np.save(depth_buffer, depth)
-                    depth_bytes = depth_buffer.getvalue()
-                    
-                    edge_buffer = io.BytesIO()
-                    np.save(edge_buffer, edge_magnitude.astype(np.float16))  # float16 to save space
-                    edge_bytes = edge_buffer.getvalue()
-                    
-                    # Load gaze
-                    gaze_path = os.path.join(seq_dir, 'gaze', frame_info['gaze'])
-                    with open(gaze_path, 'r') as f:
-                        gaze_json = f.read()
-                    
-                    # Create sample
-                    sample = {
-                        "__key__": f"{seq}_{frame_info.get('index', 0):06d}",
-                        "rgb.jpg": rgb_data,
-                        "depth.npy": depth_bytes,
-                        "edge.npy": edge_bytes,
-                        "gaze.json": gaze_json,
-                        "meta.json": json.dumps({
-                            "seq": seq,
-                            "frame_id": frame_info.get('index', 0),
-                            "height": 700,  # Correct shape
-                            "width": 800
-                        })
-                    }
-                    
-                    sink.write(sample)
-                    sample_count += 1
-                    
-                except Exception as e:
-                    print(f"Error processing {seq} frame {frame_info.get('index', 0)}: {e}")
-                    continue
-    
-    sink.close()
-    print(f"Created {split} shards with {sample_count} samples")
-    return sample_count
-
-
-def make_webdataset_loader(shard_dir, split, batch_size, num_workers, distributed, world_size, rank):
-    """Create WebDataset dataloader for efficient streaming."""
-    if not HAS_WEBDATASET:
-        return None
-    
-    shard_pattern = os.path.join(shard_dir, f"{split}_*.tar")
-    
-    # Check if shards exist
-    import glob
-    if not glob.glob(shard_pattern):
-        print(f"No shards found at {shard_pattern}")
-        return None
-    
-    # Create dataset pipeline
-    dataset = wds.WebDataset(shard_pattern, resampled=True if split == 'train' else False)
-    
-    # WebDataset handles DDP distribution automatically with resampled=True
-    # No need for explicit shard splitting in 0.2.x
-    
-    # Decode and preprocess
-    def preprocess(sample):
-        # Load RGB
-        rgb = Image.open(io.BytesIO(sample['rgb.jpg'])).convert('RGB')
-        rgb_tensor = torch.from_numpy(np.array(rgb)).permute(2, 0, 1).float() / 255.0
-        
-        # Load depth (already in meters)
-        depth = np.load(io.BytesIO(sample['depth.npy']))
-        
-        # Load pre-computed edge map
-        edge = np.load(io.BytesIO(sample['edge.npy']))
-        
-        # Load gaze
-        gaze_data = json.loads(sample['gaze.json'])
-        gaze_x = gaze_data['x_pixel']
-        gaze_y = gaze_data['y_pixel']
-        
-        # Load metadata
-        meta = json.loads(sample['meta.json'])
-        
-        # Multi-point sampling (16x: 1 real + 15 random)
-        k_extra = 15 if split == 'train' else 0
-        samples = []
-        
-        # Original gaze point
-        samples.append({
-            'gaze_x': gaze_x,
-            'gaze_y': gaze_y,
-            'is_real': True
-        })
-        
-        # Random points with edge-biased sampling
-        if k_extra > 0:
-            for _ in range(k_extra):
-                if np.random.random() < 0.3:  # 30% edge-biased
-                    # Edge-biased sampling
-                    valid_mask = (depth > 0).astype(np.float32)
-                    edge_weights = edge * valid_mask + 0.01 * valid_mask
-                    if edge_weights.sum() > 0:
-                        edge_weights = edge_weights / edge_weights.sum()
-                        flat_idx = np.random.choice(edge_weights.size, p=edge_weights.ravel())
-                        y, x = np.unravel_index(flat_idx, edge_weights.shape)
-                        # Scale to 1408x1408 (depth is 700x800)
-                        x = x * 1408.0 / 800.0
-                        y = y * 1408.0 / 700.0
-                    else:
-                        x = np.random.uniform(100, 1308)
-                        y = np.random.uniform(100, 1308)
-                else:
-                    # Uniform sampling
-                    x = np.random.uniform(100, 1308)
-                    y = np.random.uniform(100, 1308)
-                
-                samples.append({
-                    'gaze_x': x,
-                    'gaze_y': y,
-                    'is_real': False
-                })
-        
-        return {
-            'rgb': rgb_tensor,
-            'depth': depth,
-            'edge': edge,
-            'samples': samples,
-            'meta': meta
-        }
-    
-    dataset = dataset.decode().map(preprocess)
-    
-    # Batching
-    dataset = dataset.batched(batch_size, partial=False)
-    
-    # Create dataloader
-    loader = wds.WebLoader(
-        dataset,
-        batch_size=None,  # Already batched
-        num_workers=num_workers,
-        pin_memory=True
-    )
-    
-    # Set epoch length for progress tracking
-    if split == 'train':
-        # Estimate based on dataset size with multi-point sampling
-        loader.length = 220099 * 16 // batch_size // (world_size if distributed else 1)
-    else:
-        loader.length = 19364 // batch_size // (world_size if distributed else 1)
-    
-    return loader
 
 
 class SILogLoss(nn.Module):
@@ -863,13 +636,6 @@ def main():
                        help='Epoch to start SWA')
     parser.add_argument('--swa-lr', type=float, default=5e-5,
                        help='SWA learning rate')
-    parser.add_argument('--use-webdataset', action='store_true',
-                       help='Use WebDataset for faster loading')
-    parser.add_argument('--shard-dir', type=str, 
-                       default=os.path.expanduser('~/adt_webdataset_shards'),
-                       help='Directory containing WebDataset shards')
-    parser.add_argument('--create-shards', action='store_true',
-                       help='Create WebDataset shards if they don\'t exist')
     
     args = parser.parse_args()
     
@@ -888,89 +654,52 @@ def main():
     if distributed:
         model = DDP(model, device_ids=[gpu])
         
-    # Check if we should use WebDataset
-    use_webdataset = args.use_webdataset and HAS_WEBDATASET
+    # Create datasets
+    train_dataset = SpatialDualResolutionDataset(
+        data_root=args.data_root,
+        split='train',
+        augment=True,
+        max_sequences=args.max_train_sequences,
+        random_seed=args.random_seed
+    )
     
-    if use_webdataset:
-        # Create shards if requested
-        if args.create_shards and rank == 0:
-            if not os.path.exists(args.shard_dir):
-                print(f"Creating WebDataset shards at {args.shard_dir}...")
-                os.makedirs(args.shard_dir, exist_ok=True)
-                create_webdataset_shards(args.data_root, args.shard_dir, 'train', 
-                                       max_sequences=args.max_train_sequences if args.max_train_sequences < 999 else None)
-                create_webdataset_shards(args.data_root, args.shard_dir, 'val',
-                                       max_sequences=args.max_val_sequences if args.max_val_sequences < 999 else None)
-        
-        # Wait for rank 0 to finish creating shards
-        if distributed:
-            dist.barrier()
-        
-        # Create WebDataset loaders
-        train_loader = make_webdataset_loader(
-            args.shard_dir, 'train', args.batch_size, args.num_workers,
-            distributed, world_size, rank
-        )
-        
-        val_loader = make_webdataset_loader(
-            args.shard_dir, 'val', args.batch_size, args.num_workers,
-            distributed, world_size, rank
-        )
-        
-        if train_loader is None or val_loader is None:
-            print("Failed to create WebDataset loaders, falling back to regular dataset")
-            use_webdataset = False
+    val_dataset = SpatialDualResolutionDataset(
+        data_root=args.data_root,
+        split='val',
+        augment=False,
+        max_sequences=args.max_val_sequences,
+        random_seed=args.random_seed
+    )
     
-    # Fallback to regular dataset if WebDataset not available or failed
-    if not use_webdataset:
-        # Create datasets
-        # Note: k_extra=15 by default for 16x multi-point sampling (1 real + 15 random)
-        train_dataset = SpatialDualResolutionDataset(
-            data_root=args.data_root,
-            split='train',
-            augment=True,
-            max_sequences=args.max_train_sequences,
-            random_seed=args.random_seed
-            # k_extra=15 is the default in the dataset class
-        )
+    # Create samplers
+    if distributed:
+        train_sampler = DistributedSampler(train_dataset, shuffle=True)
+        val_sampler = DistributedSampler(val_dataset, shuffle=False)
+    else:
+        train_sampler = None
+        val_sampler = None
         
-        val_dataset = SpatialDualResolutionDataset(
-            data_root=args.data_root,
-            split='val',
-            augment=False,
-            max_sequences=args.max_val_sequences,
-            random_seed=args.random_seed
-        )
-        
-        # Create samplers
-        if distributed:
-            train_sampler = DistributedSampler(train_dataset, shuffle=True)
-            val_sampler = DistributedSampler(val_dataset, shuffle=False)
-        else:
-            train_sampler = None
-            val_sampler = None
-            
-        # Create dataloaders
-        train_loader = DataLoader(
-            train_dataset,
-            batch_size=args.batch_size,
-            shuffle=(train_sampler is None),
-            sampler=train_sampler,
-            num_workers=args.num_workers,
-            collate_fn=custom_collate_fn,
-            pin_memory=True,
-            drop_last=True
-        )
-        
-        val_loader = DataLoader(
-            val_dataset,
-            batch_size=args.batch_size,
-            shuffle=False,
-            sampler=val_sampler,
-            num_workers=args.num_workers,
-            collate_fn=custom_collate_fn,
-            pin_memory=True
-        )
+    # Create dataloaders
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=args.batch_size,
+        shuffle=(train_sampler is None),
+        sampler=train_sampler,
+        num_workers=args.num_workers,
+        collate_fn=custom_collate_fn,
+        pin_memory=True,
+        drop_last=True
+    )
+    
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        sampler=val_sampler,
+        num_workers=args.num_workers,
+        collate_fn=custom_collate_fn,
+        pin_memory=True
+    )
     
     # Create optimizer with selective weight decay
     target_for_groups = model.module if isinstance(model, DDP) else model
@@ -1039,8 +768,6 @@ def main():
     # Resume from checkpoint
     start_epoch = 0
     best_val_loss = float('inf')
-    best_gaze_a1 = 0.0  # Track best gaze_a1 (higher is better)
-    best_abs_rel = float('inf')  # Track best abs_rel (lower is better)
     
     if args.resume:
         checkpoint = torch.load(args.resume, map_location='cpu')
@@ -1056,23 +783,8 @@ def main():
                 print("EMA weights re-loaded")
         start_epoch = checkpoint['epoch'] + 1
         best_val_loss = checkpoint.get('best_val_loss', float('inf'))
-        
-        # Load best metrics if they exist
-        best_gaze_a1 = checkpoint.get('best_gaze_a1', 0.0)
-        best_abs_rel = checkpoint.get('best_abs_rel', float('inf'))
-        
-        # If metrics don't exist in checkpoint, try to extract from saved metrics
-        if 'ema_val_metrics' in checkpoint:
-            ema_metrics = checkpoint['ema_val_metrics']
-            if best_gaze_a1 == 0.0 and 'gaze_a1' in ema_metrics:
-                best_gaze_a1 = ema_metrics['gaze_a1']
-            if best_abs_rel == float('inf') and 'abs_rel' in ema_metrics:
-                best_abs_rel = ema_metrics['abs_rel']
-        
         if rank == 0:
             print(f"Resumed from epoch {start_epoch}")
-            print(f"  Best gaze_a1: {best_gaze_a1:.3f}")
-            print(f"  Best abs_rel: {best_abs_rel:.3f}")
             
     # Training loop
     for epoch in range(start_epoch, args.epochs):
@@ -1162,33 +874,14 @@ def main():
                 'val_metrics': val_metrics,
                 'ema_val_metrics': ema_val_metrics,
                 'best_val_loss': best_val_loss,
-                'best_gaze_a1': best_gaze_a1,
-                'best_abs_rel': best_abs_rel,
                 'args': args
             }
             
-            # Get current EMA gaze_a1 and abs_rel
-            current_gaze_a1 = ema_val_metrics.get('gaze_a1', 0.0)
-            current_abs_rel = ema_val_metrics.get('abs_rel', float('inf'))
-            
-            # Save best model based on gaze_a1 (PRIMARY METRIC)
-            if current_gaze_a1 > best_gaze_a1:
-                best_gaze_a1 = current_gaze_a1
-                checkpoint['best_gaze_a1'] = best_gaze_a1
-                torch.save(checkpoint, os.path.join(args.checkpoint_dir, 'checkpoint_best.pth'))
-                print(f"  🎯 New best model saved! (gaze_a1: {current_gaze_a1:.3f})")
-                
-            # Also save if abs_rel improved significantly (SECONDARY METRIC)
-            if current_abs_rel < best_abs_rel:
-                best_abs_rel = current_abs_rel
-                checkpoint['best_abs_rel'] = best_abs_rel
-                torch.save(checkpoint, os.path.join(args.checkpoint_dir, 'checkpoint_best_abs_rel.pth'))
-                print(f"  📊 New best abs_rel saved! (abs_rel: {current_abs_rel:.3f})")
-                
-            # Keep track of old best_val_loss for compatibility
+            # Save best model (using EMA validation loss)
             if ema_val_loss < best_val_loss:
                 best_val_loss = ema_val_loss
-                checkpoint['best_val_loss'] = best_val_loss
+                torch.save(checkpoint, os.path.join(args.checkpoint_dir, 'checkpoint_best.pth'))
+                print(f"  New best model saved (ema_val_loss: {ema_val_loss:.4f})")
                 
             # Always save latest checkpoint every epoch
             torch.save(checkpoint, os.path.join(args.checkpoint_dir, 'checkpoint_latest.pth'))

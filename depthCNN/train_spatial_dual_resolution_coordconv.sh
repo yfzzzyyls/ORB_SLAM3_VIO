@@ -33,17 +33,14 @@ fi
 
 NUM_GPUS=$1
 DATA_ROOT="/mnt/ssd_ext/incSeg-data/processed_adt"
-SHARD_DIR="$HOME/adt_webdataset_shards"  # WebDataset shards in home dir (881GB free)
-BATCH_SIZE=${BATCH_SIZE:-32}  # Per GPU (32*4=128 total)
+BATCH_SIZE=32  # Per GPU
 EPOCHS=${EPOCHS:-100}  # Standard training epochs
 LR=${LR:-1e-4}  # Standard learning rate for fresh training
 WEIGHT_DECAY=${WEIGHT_DECAY:-1e-4}  # Standard weight decay
-CHECKPOINT_DIR="./checkpoints/spatial_dual_coordconv_max"
-LOG_DIR="./logs/spatial_dual_coordconv_max"
+CHECKPOINT_DIR="./checkpoints/spatial_dual_coordconv"
+LOG_DIR="./logs/spatial_dual_coordconv"
 SCHEDULER=${SCHEDULER:-cosine_restarts}  # Default to cosine warm restarts
 USE_SWA=${USE_SWA:-0}  # Disable SWA for standard training
-NUM_WORKERS=${NUM_WORKERS:-8}  # Reduced for WebDataset (sequential I/O)
-USE_WEBDATASET=${USE_WEBDATASET:-1}  # Use WebDataset by default
 
 # Optional resume checkpoint (second argument)
 RESUME_CHECKPOINT=$2
@@ -57,13 +54,6 @@ echo "• Learning rate: $LR"
 echo "• Weight decay: $WEIGHT_DECAY"
 echo "• Epochs: $EPOCHS"
 echo "• Batch size per GPU: $BATCH_SIZE"
-echo "• Num workers: $NUM_WORKERS"
-if [ "$USE_WEBDATASET" = "1" ]; then
-    echo "• WebDataset: ENABLED (fast I/O)"
-    echo "• Shard directory: $SHARD_DIR"
-else
-    echo "• WebDataset: DISABLED (regular loading)"
-fi
 
 if [ "$USE_SWA" = "1" ]; then
     echo "• SWA: Enabled (starting at epoch 80)"
@@ -90,21 +80,11 @@ if [ $NUM_GPUS -eq 1 ]; then
         --scheduler $SCHEDULER \
         --checkpoint-dir $CHECKPOINT_DIR \
         --log-dir $LOG_DIR \
-        --num-workers $NUM_WORKERS \
+        --num-workers 4 \
         --save-freq 5 \
         --max-train-sequences 999 \
-        --max-val-sequences 999"
-    
-    # Add WebDataset flags if enabled
-    if [ "$USE_WEBDATASET" = "1" ]; then
-        CMD="$CMD --use-webdataset --shard-dir $SHARD_DIR"
-        # Create shards on first run if they don't exist
-        if [ ! -d "$SHARD_DIR" ]; then
-            CMD="$CMD --create-shards"
-        fi
-    fi
-    
-    CMD="$CMD $SWA_ARGS"
+        --max-val-sequences 999 \
+        $SWA_ARGS"
     
     # Add resume if provided
     if [ ! -z "$RESUME_CHECKPOINT" ]; then
@@ -146,21 +126,11 @@ elif [ $NUM_GPUS -gt 1 ]; then
         --scheduler $SCHEDULER \
         --checkpoint-dir $CHECKPOINT_DIR \
         --log-dir $LOG_DIR \
-        --num-workers $NUM_WORKERS \
+        --num-workers 4 \
         --save-freq 5 \
         --max-train-sequences 999 \
-        --max-val-sequences 999"
-    
-    # Add WebDataset flags if enabled
-    if [ "$USE_WEBDATASET" = "1" ]; then
-        CMD="$CMD --use-webdataset --shard-dir $SHARD_DIR"
-        # Create shards on first run if they don't exist
-        if [ ! -d "$SHARD_DIR" ]; then
-            CMD="$CMD --create-shards"
-        fi
-    fi
-    
-    CMD="$CMD $SWA_ARGS"
+        --max-val-sequences 999 \
+        $SWA_ARGS"
     
     # Add resume if provided
     if [ ! -z "$RESUME_CHECKPOINT" ]; then
