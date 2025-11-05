@@ -7,6 +7,8 @@
 # Unignore all dirs
 !*/
 
+depthCNN/checkpoints
+
 CMakeLists.txt.user
 CMakeLists_modified.txt
 

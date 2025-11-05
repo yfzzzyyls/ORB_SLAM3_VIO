@@ -1,0 +1,111 @@
+%YAML:1.0
+
+#--------------------------------------------------------------------------------------------
+# Camera Parameters for Aria Digital Twin (ADT) RIGHT SLAM camera (Original 640x480)
+# Updated for ADT dataset: 30Hz camera, 1000Hz RIGHT IMU (2025-01-08)
+# Using right camera + right IMU for same-side configuration
+# Keeps original sideways-mounted camera orientation (no rotation applied)
+#--------------------------------------------------------------------------------------------
+File.version: "1.0"
+
+# Camera model - KannalaBrandt8 for fisheye/wide-angle cameras
+Camera.type: "KannalaBrandt8"
+
+# Camera intrinsics - RIGHT CAMERA VALUES
+# Resolution: 640x480 (original orientation)
+# ADT RIGHT camera values: fx=241.0794006560098, cx=317.8779842776632, cy=238.2045722980715
+Camera1.fx: 241.0794006560098
+Camera1.fy: 241.0794006560098
+Camera1.cx: 317.8779842776632   # original cx
+Camera1.cy: 238.2045722980715   # original cy
+
+# Kannala-Brandt distortion parameters (RIGHT camera)
+# Mapped from Aria's projection parameters
+Camera1.k1: -0.02534979127436547    # Aria k2
+Camera1.k2: 0.09753838193062647     # Aria k3
+Camera1.k3: -0.06689939727565536    # Aria k4
+Camera1.k4: 0.009687761670493508    # Aria k5
+
+# Camera resolution
+Camera.width: 640
+Camera.height: 480
+
+# Camera frame rate (ADT SLAM cameras run at 30Hz)
+Camera.fps: 30
+
+# Color order (0: BGR, 1: RGB. Ignored for grayscale)
+Camera.RGB: 1
+
+# Transformation from RIGHT IMU (body frame) to RIGHT camera
+# This matrix is calculated from Aria calibration data
+# Note: This transform is for right IMU to right camera (same side)
+IMU.T_b_c1: !!opencv-matrix
+   rows: 4
+   cols: 4
+   dt: f
+   data: [0.986402413, 0.057123357, -0.154101271, -0.001522004, 
+          0.057723419, -0.998332444, -0.000581313, -0.000235453, 
+          -0.153877505, -0.008321844, -0.988054887, -0.006221336, 
+          0.000000000, 0.000000000, 0.000000000, 1.000000000]
+
+# IMU noise parameters for Aria RIGHT IMU (1202-1) @ 1000Hz
+IMU.NoiseGyro: 1.6968e-4      # rad/s/√Hz (TUM-VI gyroscope noise density)
+IMU.NoiseAcc: 2.8000e-3       # m/s²/√Hz (TUM-VI accelerometer noise density)
+IMU.GyroWalk: 1.9393e-5       # rad/s²/√Hz (TUM-VI gyroscope random walk)
+IMU.AccWalk: 8.6000e-4        # m/s³/√Hz (TUM-VI accelerometer random walk)
+IMU.Frequency: 1000.0         # Hz (native ADT IMU rate)
+
+# IMU initialization parameters - CRITICAL for stability
+IMU.InsertKFsWhenLost: 1      # Insert keyframes even when tracking is lost (helps recovery)
+
+#--------------------------------------------------------------------------------------------
+# ORB Parameters
+#--------------------------------------------------------------------------------------------
+
+# ORB Extractor: Number of features per image
+# Standard ORB-SLAM3 default
+ORBextractor.nFeatures: 2000
+
+# ORB Extractor: Scale factor between levels in the scale pyramid
+ORBextractor.scaleFactor: 1.2
+
+# ORB Extractor: Number of levels in the scale pyramid
+ORBextractor.nLevels: 8
+
+# ORB Extractor: Fast threshold
+# Image is divided in a grid. At each cell FAST are extracted imposing a minimum response.
+# Firstly we impose iniThFAST. If no corners are detected we impose a lower value minThFAST
+# Lowered thresholds for dark indoor scenes
+ORBextractor.iniThFAST: 15
+ORBextractor.minThFAST: 5
+
+#--------------------------------------------------------------------------------------------
+# Viewer Parameters
+#--------------------------------------------------------------------------------------------
+Viewer.KeyFrameSize: 0.05
+Viewer.KeyFrameLineWidth: 1.0
+Viewer.GraphLineWidth: 0.9
+Viewer.PointSize: 2.0
+Viewer.CameraSize: 0.08
+Viewer.CameraLineWidth: 3.0
+Viewer.ViewpointX: 0.0
+Viewer.ViewpointY: -0.7
+Viewer.ViewpointZ: -3.5
+Viewer.ViewpointF: 500.0
+
+#--------------------------------------------------------------------------------------------
+# System Parameters
+#--------------------------------------------------------------------------------------------
+# System.thFarPoints: 20.0     # Consider points beyond this depth as "far" (optional)
+
+#--------------------------------------------------------------------------------------------
+# Camera Parameters (optional but can help with fisheye cameras)
+#--------------------------------------------------------------------------------------------
+# Camera.newWidth: 640          # No resizing needed for Aria
+# Camera.newHeight: 480         # No resizing needed for Aria
+
+#--------------------------------------------------------------------------------------------
+# VIO-only mode - Disable loop closing
+#--------------------------------------------------------------------------------------------
+# This disables the loop closing thread to run pure Visual-Inertial Odometry
+loopClosing: 0
